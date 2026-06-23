@@ -15,13 +15,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
-import asyncpg
-import redis.asyncio as aioredis
 from fastapi import FastAPI
 from qdrant_client import AsyncQdrantClient
 
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
+from app.db import session as db
+from app.infra import redis_client as rds
 
 # 进程启动即配置日志（在任何 log 调用之前）
 setup_logging()
@@ -33,20 +33,27 @@ _PROBE_TIMEOUT = 2.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时建客户端，关闭时优雅释放。
+    """应用生命周期：启动时建立连接池，关闭时优雅释放。
 
-    redis / qdrant 客户端是"懒连接"的——创建对象时并不真正连，首次用到才连，
-    所以即使依赖还没起来，应用也能正常启动，由 /health 如实报告其状态。
-    Postgres 我们在 M0 用"每次探活临时连一下"的方式（见 _check_postgres），
-    到 M3 再换成 SQLAlchemy 连接池。
+    三个客户端都是"懒连接"的——创建对象/引擎时并不真正连，首次借连接才连，
+    所以即使依赖还没起来，应用也能正常启动，由 /health 如实报告其状态（降级不阻断）。
+    池/引擎全局只建一次，存进 app.state 供所有请求复用。
     """
     log.info("app.startup", app=settings.app_name, env=settings.app_env)
-    app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    # Postgres：SQLAlchemy 异步引擎（内含连接池）+ 会话工厂
+    app.state.db_engine = db.build_engine()
+    app.state.db_sessionmaker = db.build_sessionmaker(app.state.db_engine)
+    # Redis：显式连接池 + client
+    app.state.redis_pool = rds.build_redis_pool()
+    app.state.redis = rds.build_redis_client(app.state.redis_pool)
+    # Qdrant
     app.state.qdrant = AsyncQdrantClient(url=settings.qdrant_url)
     yield
     log.info("app.shutdown")
     await app.state.redis.aclose()
+    await app.state.redis_pool.aclose()
     await app.state.qdrant.close()
+    await app.state.db_engine.dispose()  # 关闭池里所有连接
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
@@ -54,14 +61,9 @@ app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
 async def _check_postgres() -> dict[str, Any]:
     try:
-        conn = await asyncio.wait_for(
-            asyncpg.connect(dsn=settings.database_dsn), timeout=_PROBE_TIMEOUT
-        )
-        try:
-            await conn.fetchval("SELECT 1")
-        finally:
-            await conn.close()
-        return {"ok": True}
+        await asyncio.wait_for(db.ping(app.state.db_engine), timeout=_PROBE_TIMEOUT)
+        # 把连接池实时状态一并返回，让你能"看见"池在工作
+        return {"ok": True, "pool": db.pool_stats(app.state.db_engine)}
     except Exception as e:  # noqa: BLE001 —— 探活就是要兜住所有异常如实上报
         return {"ok": False, "error": repr(e)}
 
@@ -69,7 +71,7 @@ async def _check_postgres() -> dict[str, Any]:
 async def _check_redis() -> dict[str, Any]:
     try:
         await asyncio.wait_for(app.state.redis.ping(), timeout=_PROBE_TIMEOUT)
-        return {"ok": True}
+        return {"ok": True, "pool": rds.pool_stats(app.state.redis_pool)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": repr(e)}
 

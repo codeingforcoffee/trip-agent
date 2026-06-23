@@ -41,10 +41,22 @@ class Settings(BaseSettings):
     postgres_password: str = "trip_pass"
     postgres_db: str = "trip_agent"
 
+    # —— Postgres 连接池（SQLAlchemy 异步引擎，全部可配）——
+    db_pool_size: int = 10  # 常驻连接数
+    db_max_overflow: int = 20  # 峰值临时溢出连接数（池满时最多再临时开这么多）
+    db_pool_timeout: int = 30  # 池满时获取连接的最长等待秒数，超时即报错（快速失败）
+    db_pool_recycle: int = 1800  # 连接最大存活秒数，超过则回收重建（防被 DB/防火墙掐断）
+    db_pool_pre_ping: bool = True  # 借出前 ping 一下，自动剔除失效连接
+    db_echo: bool = False  # 是否打印 SQL（调试用，生产关）
+
     # —— Redis（分布式锁 / 限流 / 缓存）——
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
+    redis_max_connections: int = 50  # 连接池上限
+    redis_socket_timeout: float = 3.0  # 读写超时（秒）
+    redis_socket_connect_timeout: float = 3.0  # 建连超时（秒）
+    redis_health_check_interval: int = 30  # 空闲连接每隔 N 秒自检，剔除死连接
 
     # —— Qdrant（RAG 向量 + 语义记忆）——
     qdrant_host: str = "localhost"
