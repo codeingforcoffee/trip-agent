@@ -20,6 +20,11 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0", # 异步 ORM + 连接池（Postgres）
     "asyncpg>=0.30",       # SQLAlchemy 的异步 Postgres 驱动
     "qdrant-client>=1.12,<1.13", # 向量库客户端（M5 做 RAG / 语义记忆）；钉到与服务端 v1.12.x 同线，避免版本偏移警告
+    # —— Agent 编排与 LLM（M1）——
+    "langgraph>=0.2.50",                  # 图编排
+    "langgraph-checkpoint-postgres>=2.0", # PostgresSaver 短期记忆（底层用 psycopg3）
+    "langchain-deepseek>=0.1.2",          # DeepSeek 官方 LangChain 集成
+    "psycopg[binary]>=3.2",               # checkpointer 的 Postgres 驱动（binary 免编译）
 ]
 
 [dependency-groups]

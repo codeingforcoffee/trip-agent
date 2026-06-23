@@ -28,6 +28,9 @@ sync: ## 安装/同步后端依赖（含 dev）
 run: ## 启动后端 API（开发模式，热重载，:8000）
 	cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
+chat: ## 启动差旅 Agent CLI 交互模式（M1）；可加 THREAD=xxx
+	cd backend && uv run python -m app.agent.cli --thread $(or $(THREAD),demo)
+
 health: ## 探活后端（需 run 已启动）
 	@curl -s http://localhost:8000/health | python3 -m json.tool
 
