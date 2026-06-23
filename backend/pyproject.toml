@@ -1,0 +1,48 @@
+[project]
+name = "trip-agent-backend"
+version = "0.1.0"
+description = "差旅 Agent 后端 —— 企业级全栈 LangGraph 应用"
+readme = "../README.md"
+# 锁定 Python 3.12：系统是 3.14 太新，LangGraph/psycopg/sentence-transformers 等库尚未完全跟进。
+# uv 会在 `uv sync` 时自动下载并使用一个 3.12 解释器，不依赖系统 Python。
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # —— Web 框架与 ASGI 服务器 ——
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    # —— 配置中心（读取 .env，类型校验）——
+    "pydantic-settings>=2.6",
+    # —— 结构化日志 ——
+    "structlog>=24.4",
+    # —— 三个依赖的客户端（M0 仅用于 /health 探活）——
+    "redis>=5.2",          # 异步 Redis 客户端（M4 做分布式锁/限流）
+    "asyncpg>=0.30",       # 异步 Postgres 驱动（M0 探活用；M3 起接 SQLAlchemy）
+    "qdrant-client>=1.12,<1.13", # 向量库客户端（M5 做 RAG / 语义记忆）；钉到与服务端 v1.12.x 同线，避免版本偏移警告
+]
+
+[dependency-groups]
+# 开发依赖：用 `uv sync --group dev` 安装。不进生产镜像，保持镜像精简。
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",         # 测试时调用自己的 API
+    "ruff>=0.7",           # lint/format
+]
+
+# 让 hatchling 把 backend/app 作为可安装包（editable），
+# 这样 `uv run` 时无论 cwd 在哪，`import app.xxx` 都能解析。
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -1,0 +1,61 @@
+# 差旅 Agent 的依赖编排：一条 `docker compose up -d` 拉起全部基础设施。
+# 设计原则（对应"可预测"）：
+#   - 镜像 tag 固定到具体版本，不用 latest，保证团队/CI 跑的是同一套；
+#   - 数据用具名 volume 持久化，重启不丢；
+#   - 关键依赖带 healthcheck，编排系统能判断"真的就绪"而非"端口刚开"。
+# 环境变量从同目录 .env 读取（与后端 pydantic-settings 共用同一份）。
+
+name: trip-agent
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trip}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trip_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-trip_agent}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready 是 postgres 自带的就绪探针，比"端口能连"更可靠
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trip} -d ${POSTGRES_DB:-trip_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: trip-redis
+    restart: unless-stopped
+    # appendonly 开持久化，避免重启丢掉锁/限流计数（M4 用得到）
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: trip-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333" # REST/HTTP API
+      - "6334:6334"                 # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # 注：qdrant 官方镜像不含 curl/bash，容器级 healthcheck 不好写，
+    # 这里改由后端 /health 通过客户端调用 get_collections() 来探活，更贴近真实可用性。
+
+volumes:
+  pg_data:
+  redis_data:
+  qdrant_data:

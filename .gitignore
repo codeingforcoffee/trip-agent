@@ -1,0 +1,33 @@
+# —— 密钥 / 环境 ——
+.env
+.env.*
+!.env.example
+
+# —— Python ——
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.db
+*.sqlite3
+
+# —— 本地模型缓存（BGE 等，M5 下载）——
+.cache/
+models/
+
+# —— 前端（M9）——
+node_modules/
+frontend/dist/
+
+# —— 评测产物（M8）——
+eval/reports/
+eval/cassettes/*.local.*
+
+# —— IDE / OS ——
+.vscode/
+.idea/
+.DS_Store
