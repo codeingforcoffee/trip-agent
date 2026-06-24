@@ -16,9 +16,13 @@ from app.agent.tools.flights import search_flights
 
 
 class _FakeLLM:
-    """假 LLM：build_graph 只需要它能 bind_tools，编译图时不会真正调用。"""
+    """假 LLM：build_graph 只需要它能 bind_tools / with_structured_output，
+    编译图时不会真正调用（M2+ 起 triage 节点会要后者）。"""
 
     def bind_tools(self, tools):  # noqa: ANN001
+        return self
+
+    def with_structured_output(self, schema):  # noqa: ANN001
         return self
 
 

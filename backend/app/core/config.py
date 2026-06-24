@@ -70,7 +70,12 @@ class Settings(BaseSettings):
     # —— 工具层（M2）——
     # mock 工具的模拟网络延迟（毫秒）。默认 0：测试/评测保持瞬时、时间确定。
     # 演示并发时设成 300 左右，就能在日志里看到「3 个工具并发只花 ~300ms 而非 900ms」。
-    tool_mock_latency_ms: int = 0
+    tool_mock_latency_ms: int = 300
+
+    # —— 分诊/澄清（M2+）——
+    # 是否启用 triage 节点（意图分类 + 槽位门控 + 缺槽时主动反问）。
+    # 关掉则退回直连图、每轮省一次 LLM 调用，但不再主动澄清（靠 system prompt 自觉）。
+    enable_triage: bool = True
 
     # —— JWT 鉴权（M3 引入）——
     jwt_secret: str = "dev-secret-change-me"

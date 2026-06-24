@@ -18,13 +18,21 @@ import asyncio
 from datetime import date
 from time import perf_counter
 
-from langchain_core.messages import AnyMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS, TOOLS_BY_NAME
+from app.agent.triage import (
+    TRIAGE_SYSTEM_PROMPT,
+    TripIntent,
+    build_clarify_question,
+    clarification_needs,
+    route_after_triage,
+)
+from app.core.config import settings
 from app.core.logging import get_logger
 
 log = get_logger("app.agent.graph")
@@ -90,12 +98,21 @@ def build_graph(
     llm,
     tools: list[BaseTool] | None = None,
     checkpointer=None,
+    enable_triage: bool | None = None,
 ) -> CompiledStateGraph:
-    """组装并编译图。llm 为已构造的聊天模型；checkpointer 为短期记忆后端。"""
+    """组装并编译图。llm 为已构造的聊天模型；checkpointer 为短期记忆后端。
+
+    enable_triage：是否启用"分诊+澄清"节点（M2+）。None 时取 settings.enable_triage。
+    关掉就退回 M2 的 START→agent 直连图（省一次 LLM 调用，但不再主动澄清）。
+    """
     tools = tools if tools is not None else ALL_TOOLS
     tools_by_name = {t.name: t for t in tools} or TOOLS_BY_NAME
+    if enable_triage is None:
+        enable_triage = settings.enable_triage
     # bind_tools：把工具的 JSON Schema 告诉模型，模型才会产出 tool_calls
     llm_with_tools = llm.bind_tools(tools)
+    # triage 用结构化输出，提前 bind 一次复用；关闭时不调用，便于无该能力的 LLM 直连
+    triage_llm = llm.with_structured_output(TripIntent) if enable_triage else None
 
     async def agent_node(state: AgentState) -> dict[str, list[AnyMessage]]:
         """agent 节点：把系统提示 + 历史消息喂给模型，拿回它的决策/回答。"""
@@ -127,12 +144,51 @@ def build_graph(
         )
         return {"messages": list(outputs)}
 
+    async def triage_node(state: AgentState) -> dict:
+        """分诊节点（M2+）：用结构化输出从**整段对话**抽意图+槽位，算出待澄清点。
+
+        喂完整历史而非只喂最后一句，是为了天然处理多轮补槽/指代：第二轮"北京出发"
+        时，triage 仍能从第一轮"我想去上海"里把 destination 抽回来，合并成完整槽位。
+        """
+        sys = SystemMessage(content=TRIAGE_SYSTEM_PROMPT.format(today=date.today().isoformat()))
+        intent: TripIntent = await triage_llm.ainvoke([sys, *state["messages"]])
+        slots = {
+            "origin": intent.origin,
+            "destination": intent.destination,
+            "date": intent.date,
+        }
+        needs = clarification_needs(intent.intent, slots)
+        log.info("triage", intent=intent.intent, slots=slots, clarify_needs=needs)
+        return {"intent": intent.intent, "slots": slots, "clarify_needs": needs}
+
+    def clarify_node(state: AgentState) -> dict[str, list[AnyMessage]]:
+        """澄清节点（M2+）：把待澄清点拼成一句反问返回，本轮到此结束、等用户补充。
+
+        纯函数构造问题（不调 LLM）→ 确定性、零成本、可单测。它产出的是普通 AIMessage
+        （无 tool_calls），所以 clarify→END，CLI 会把它当作助手发言打印出来。
+        """
+        question = build_clarify_question(state.get("clarify_needs", []))
+        log.info("clarify.ask", needs=state.get("clarify_needs"))
+        return {"messages": [AIMessage(content=question)]}
+
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
-    builder.add_edge(START, "agent")
     # 条件边：agent 之后，按 should_continue 的返回值选择去向
     builder.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
     builder.add_edge("tools", "agent")  # 工具跑完回到 agent，形成循环
+
+    if enable_triage:
+        # START → triage →(缺槽)→ clarify → END ；(齐了)→ agent
+        builder.add_node("triage", triage_node)
+        builder.add_node("clarify", clarify_node)
+        builder.add_edge(START, "triage")
+        builder.add_conditional_edges(
+            "triage", route_after_triage, {"clarify": "clarify", "agent": "agent"}
+        )
+        builder.add_edge("clarify", END)
+    else:
+        builder.add_edge(START, "agent")  # 关闭分诊：退回 M2 直连图
+
     # compile 时传入 checkpointer：图每走一步都会把 State 存进它（=短期记忆）
     return builder.compile(checkpointer=checkpointer)

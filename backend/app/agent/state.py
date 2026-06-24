@@ -16,7 +16,7 @@ M1 只需要一个字段 messages（对话消息列表）：
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -25,3 +25,11 @@ from langgraph.graph.message import add_messages
 class AgentState(TypedDict):
     # 对话消息列表；reducer=add_messages 表示"追加合并"
     messages: Annotated[list[AnyMessage], add_messages]
+
+    # —— M2+ triage(分诊)节点写入的字段 ——
+    # 没有显式 reducer → 默认 last-write-wins(后写覆盖)。triage 每轮基于完整历史
+    # 重算，所以覆盖正是我们要的。用 NotRequired 表示这些字段不是每个 State 都有
+    # （例如关闭 triage 时就不存在），节点读取时用 state.get(...) 兜底。
+    intent: NotRequired[str]  # 本轮意图分类：flight/hotel/policy/chitchat...
+    slots: NotRequired[dict[str, str | None]]  # 抽到的槽位 origin/destination/date
+    clarify_needs: NotRequired[list[str]]  # 需要向用户追问的点；非空则走 clarify
