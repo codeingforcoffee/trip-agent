@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+    # —— 工具层（M2）——
+    # mock 工具的模拟网络延迟（毫秒）。默认 0：测试/评测保持瞬时、时间确定。
+    # 演示并发时设成 300 左右，就能在日志里看到「3 个工具并发只花 ~300ms 而非 900ms」。
+    tool_mock_latency_ms: int = 0
+
     # —— JWT 鉴权（M3 引入）——
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"

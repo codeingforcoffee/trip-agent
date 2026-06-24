@@ -8,13 +8,15 @@
   - 节点是闭包，把 llm/tools 通过 build_graph 参数注入，避免全局耦合、方便测试；
   - 身份/租户等"每次调用都不同、但不属于对话内容"的东西，走 LangGraph 的
     config.configurable（M3 会注入 tenant_id/user_id），而不是塞进 State；
-  - M1 的 tools 节点是**顺序**执行的（一次只跑一个工具调用），保持透明易懂；
-    M2 会把它升级为 asyncio.gather 并发执行 + 错误自纠。
+  - M2 起 tools 节点用 asyncio.gather **并发**执行一轮里的多个 tool_call，
+    单个工具的异常被隔离在自己的任务里（部分失败不连累其它），并回灌给模型自纠。
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
+from time import perf_counter
 
 from langchain_core.messages import AnyMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -51,6 +53,39 @@ def should_continue(state: AgentState) -> str:
     return "end"
 
 
+async def _run_tool_call(call: dict, tools_by_name: dict[str, BaseTool]) -> ToolMessage:
+    """执行单个 tool_call，**永远**返回一条 ToolMessage（错误也包成消息，绝不抛出）。
+
+    为什么 try/except 包在这一层而不是 gather 外面：tools 节点会并发跑多个工具，
+    任一工具抛异常都不该连累其它工具——这就是「部分失败隔离」。被捕获的异常
+    （含 pydantic 参数校验错误）作为文本回灌给模型，触发它修正参数后重试（自纠）。
+
+    抽成模块级函数（而非闭包）是为了能离线单测：直接喂一个 call dict 验证行为。
+    """
+    name = call["name"]
+    tool = tools_by_name.get(name)
+    if tool is None:
+        # 模型幻觉出一个不存在的工具名时，告诉它而不是崩溃
+        return ToolMessage(content=f"错误：未知工具 {name}", tool_call_id=call["id"], name=name)
+    t0 = perf_counter()
+    try:
+        # ainvoke 会先用 args_schema 校验参数（失败抛 ValidationError），再执行工具；
+        # 同步工具被自动放到线程池里跑，所以 gather 多个工具能真正并行。
+        content = str(await tool.ainvoke(call["args"]))
+        ok = True
+    except Exception as e:  # noqa: BLE001 —— 故意兜底：任何异常都回灌给模型而非中断图
+        content = f"工具 {name} 调用失败：{e}。请检查并修正参数后重试。"
+        ok = False
+    log.info(
+        "tools.call_done",
+        tool=name,
+        ok=ok,
+        elapsed_ms=round((perf_counter() - t0) * 1000, 1),
+    )
+    # ToolMessage 必须带 tool_call_id，框架据此把结果与那次调用配对
+    return ToolMessage(content=content, tool_call_id=call["id"], name=name)
+
+
 def build_graph(
     llm,
     tools: list[BaseTool] | None = None,
@@ -74,25 +109,23 @@ def build_graph(
         return {"messages": [response]}
 
     async def tools_node(state: AgentState) -> dict[str, list[AnyMessage]]:
-        """tools 节点：执行最后一条 AI 消息里的所有 tool_calls（M1 顺序执行）。"""
-        last = state["messages"][-1]
-        outputs: list[AnyMessage] = []
-        for call in last.tool_calls:
-            tool = tools_by_name.get(call["name"])
-            if tool is None:
-                content = f"错误：未知工具 {call['name']}"
-            else:
-                try:
-                    # ainvoke 接收参数 dict；同步工具会被自动放到线程池里跑
-                    content = str(await tool.ainvoke(call["args"]))
-                except Exception as e:  # noqa: BLE001 —— 工具异常要回灌给模型让它自纠，而非崩溃
-                    content = f"工具 {call['name']} 执行出错：{e!r}"
-            log.info("tools.executed", tool=call["name"], args=call["args"])
-            # ToolMessage 必须带 tool_call_id，框架据此把结果和那次调用配对
-            outputs.append(
-                ToolMessage(content=content, tool_call_id=call["id"], name=call["name"])
-            )
-        return {"messages": outputs}
+        """tools 节点：**并发**执行最后一条 AI 消息里的所有 tool_calls。
+
+        asyncio.gather 同时发起所有工具调用并等它们全部完成；它**保持顺序**，
+        返回的 ToolMessage 与 tool_calls 一一对应（顺序不能乱，否则 id 配对会错）。
+        对比日志里每个工具的 elapsed_ms 之和 与 这里的 wall_ms：并发下 wall_ms ≈
+        最慢的那个工具，而非各工具之和——这就是 fan-out 的收益。
+        """
+        calls = state["messages"][-1].tool_calls
+        t0 = perf_counter()
+        log.info("tools.fanout_start", count=len(calls), tools=[c["name"] for c in calls])
+        outputs = await asyncio.gather(*(_run_tool_call(c, tools_by_name) for c in calls))
+        log.info(
+            "tools.fanout_done",
+            count=len(calls),
+            wall_ms=round((perf_counter() - t0) * 1000, 1),
+        )
+        return {"messages": list(outputs)}
 
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
