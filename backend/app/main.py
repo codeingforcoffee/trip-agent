@@ -18,6 +18,8 @@ from typing import Any
 from fastapi import FastAPI
 from qdrant_client import AsyncQdrantClient
 
+from app.api import auth as auth_api
+from app.api import conversations as conversations_api
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.db import session as db
@@ -57,6 +59,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+
+# 业务路由（M3）：登录发 JWT + 租户态会话增查
+app.include_router(auth_api.router)
+app.include_router(conversations_api.router)
 
 
 async def _check_postgres() -> dict[str, Any]:

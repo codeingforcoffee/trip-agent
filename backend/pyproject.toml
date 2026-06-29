@@ -25,6 +25,10 @@ dependencies = [
     "langgraph-checkpoint-postgres>=2.0", # PostgresSaver 短期记忆（底层用 psycopg3）
     "langchain-deepseek>=0.1.2",          # DeepSeek 官方 LangChain 集成
     "psycopg[binary]>=3.2",               # checkpointer 的 Postgres 驱动（binary 免编译）
+    # —— 多租户与身份（M3）——
+    "alembic>=1.13",       # 数据库迁移（版本化、可回滚的 schema 演进）
+    "pyjwt>=2.9",          # JWT 签发/校验（身份令牌）
+    "bcrypt>=4.2",         # 密码哈希（直连，不走 passlib，避免 passlib/bcrypt 版本兼容坑）
 ]
 
 [dependency-groups]

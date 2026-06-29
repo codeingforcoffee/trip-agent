@@ -37,9 +37,16 @@ class Settings(BaseSettings):
     # —— Postgres（短期记忆 checkpoint + 多租户业务 + 审计）——
     postgres_host: str = "localhost"
     postgres_port: int = 5432
-    postgres_user: str = "trip"
+    postgres_user: str = "trip"  # docker 里是【超级用户】：迁移/seed/checkpointer 用它（无视 RLS）
     postgres_password: str = "trip_pass"
     postgres_db: str = "trip_agent"
+
+    # —— 应用运行时专用 DB 角色（M3）——
+    # 关键：docker 的 postgres_user 是超级用户，而【超级用户无视 RLS】。
+    # 所以应用业务查询必须用这个【普通角色】连库，行级安全才真正生效。
+    # 生产铁律：应用绝不以表 owner / 超级用户身份连库。角色由 M3 迁移自动创建。
+    app_db_user: str = "trip_app"
+    app_db_password: str = "trip_app_pass"
 
     # —— Postgres 连接池（SQLAlchemy 异步引擎，全部可配）——
     db_pool_size: int = 10  # 常驻连接数
@@ -78,7 +85,9 @@ class Settings(BaseSettings):
     enable_triage: bool = True
 
     # —— JWT 鉴权（M3 引入）——
-    jwt_secret: str = "dev-secret-change-me"
+    # 默认值≥32 字节：HS256 的 HMAC 密钥短于 32 字节 pyjwt 会告警（且不安全）。
+    # 这仍是显眼的占位串，生产务必用 `openssl rand -hex 32` 换掉。
+    jwt_secret: str = "dev-secret-change-me-in-production-please"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
@@ -87,9 +96,17 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """SQLAlchemy 异步引擎用（M3+），驱动 asyncpg。"""
+        """管理连接（asyncpg）：超级用户 trip。迁移 / seed 用——【无视 RLS】，可跨租户操作。"""
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def app_database_url(self) -> str:
+        """应用运行时连接（asyncpg）：普通角色 trip_app。业务查询用——【受 RLS 约束】。"""
+        return (
+            f"postgresql+asyncpg://{self.app_db_user}:{self.app_db_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

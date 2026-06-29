@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help up down ps logs sync run health test migrate eval clean
+.PHONY: help up down ps logs sync run health test migrate revision seed eval clean
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -37,8 +37,14 @@ health: ## 探活后端（需 run 已启动）
 test: ## 运行测试
 	cd backend && uv run pytest
 
-migrate: ## 数据库迁移（M3 引入）
+migrate: ## 数据库迁移到最新（M3 引入）
 	cd backend && uv run alembic upgrade head
+
+revision: ## 生成迁移（自动对比模型）：make revision M="描述"
+	cd backend && uv run alembic revision --autogenerate -m "$(or $(M),change)"
+
+seed: ## 灌入演示数据：2 租户 + 用户（M3）
+	cd backend && uv run python scripts/seed.py
 
 eval: ## 离线评测（M8 引入）
 	cd backend && uv run python -m eval.run_eval

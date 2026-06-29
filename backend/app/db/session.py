@@ -31,9 +31,14 @@ from app.core.config import settings
 
 
 def build_engine() -> AsyncEngine:
-    """按配置创建异步引擎（内含连接池）。整个进程只调一次。"""
+    """按配置创建异步引擎（内含连接池）。整个进程只调一次。
+
+    M3 起用 **app_database_url（普通角色 trip_app）** 而非超级用户 trip：
+    超级用户无视 RLS，只有普通角色连库行级安全才生效。迁移/seed/checkpointer
+    仍走超级用户（见 alembic/env.py、seed、checkpointer），各司其职。
+    """
     return create_async_engine(
-        settings.database_url,  # postgresql+asyncpg://...
+        settings.app_database_url,  # postgresql+asyncpg://trip_app:...（受 RLS 约束）
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_timeout=settings.db_pool_timeout,
@@ -67,7 +72,27 @@ def pool_stats(engine: AsyncEngine) -> dict[str, int]:
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     """FastAPI 依赖：从 app.state 的会话工厂取一个 Session，请求结束自动关闭。
-    M3 起的路由用 `session: AsyncSession = Depends(get_session)` 注入。"""
+    M3 起的路由用 `session: AsyncSession = Depends(get_session)` 注入。
+
+    注意：这条没有设租户上下文，RLS 下看不到任何行（fail-closed）。需要访问租户
+    数据的路由用 core/deps.py 的 get_tenant_session（它会先设好租户上下文）。"""
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.db_sessionmaker
     async with sessionmaker() as session:
         yield session
+
+
+async def set_tenant_context(session: AsyncSession, tenant_id) -> None:
+    """在当前事务里设置 RLS 用的租户上下文。**这是多租户安全的命门。**
+
+    为什么用 set_config(name, value, is_local=true) 而不是 `SET LOCAL`：
+      - set_config 能安全【传参】（防 SQL 注入）；SET LOCAL 不能用绑定参数；
+      - 第三参 is_local=true 等价于 SET LOCAL —— 只在【当前事务】有效。
+    为什么必须事务级而非会话级（SET）：连接池会跨请求复用连接。若用会话级 SET，
+    上个请求（租户 A）设的值会残留在连回池子的连接上，下个请求（租户 B）借到这条
+    脏连接就继承了 A 的身份 → 跨租户泄露。事务级设定在提交/回滚时自动失效，连接
+    干净归还，杜绝残留。
+    """
+    await session.execute(
+        text("SELECT set_config('app.current_tenant', :tid, true)"),
+        {"tid": str(tenant_id)},
+    )
