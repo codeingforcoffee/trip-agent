@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.reliability import CircuitOpen, call_tool_resilient
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS, TOOLS_BY_NAME
 from app.agent.triage import (
@@ -77,10 +78,14 @@ async def _run_tool_call(call: dict, tools_by_name: dict[str, BaseTool]) -> Tool
         return ToolMessage(content=f"错误：未知工具 {name}", tool_call_id=call["id"], name=name)
     t0 = perf_counter()
     try:
-        # ainvoke 会先用 args_schema 校验参数（失败抛 ValidationError），再执行工具；
-        # 同步工具被自动放到线程池里跑，所以 gather 多个工具能真正并行。
-        content = str(await tool.ainvoke(call["args"]))
+        # M4：经可靠性封装调用——超时 + 重试(仅幂等) + 熔断。参数校验失败仍抛 ValidationError，
+        # 被下面 except 兜住回灌给模型自纠（保持 M2 行为）。
+        content = await call_tool_resilient(tool, call["args"], name=name)
         ok = True
+    except CircuitOpen:
+        # 熔断开路：优雅降级，告诉模型"暂不可用"，而非让它干等必然失败
+        content = f"工具 {name} 暂时不可用（已熔断保护），请稍后再试或换个方式。"
+        ok = False
     except Exception as e:  # noqa: BLE001 —— 故意兜底：任何异常都回灌给模型而非中断图
         content = f"工具 {name} 调用失败：{e}。请检查并修正参数后重试。"
         ok = False

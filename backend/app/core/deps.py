@@ -20,8 +20,10 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import Identity, decode_access_token
 from app.db.session import set_tenant_context
+from app.infra.ratelimit import RateLimiter, RateLimitResult, ratelimit_key
 
 # auto_error=False：自己处理缺失/非法，统一返回 401 + WWW-Authenticate（语义更准）。
 _bearer = HTTPBearer(auto_error=False)
@@ -84,3 +86,35 @@ def require_scopes(
         return identity
 
     return checker
+
+
+def rate_limit(
+    scope: str = "user",
+    capacity: int | None = None,
+    refill_per_sec: float | None = None,
+):
+    """依赖工厂：令牌桶限流。按租户隔离 key，scope 决定限流维度（user / tenant）。
+
+    超限抛 429 + Retry-After 头。从 app.state.redis 借连接（M0 建的池）。
+    M9 的 /chat 会挂它；用法：`_: RateLimitResult = Depends(rate_limit())`。
+    """
+    cap = capacity if capacity is not None else settings.ratelimit_capacity
+    rate = refill_per_sec if refill_per_sec is not None else settings.ratelimit_refill_per_sec
+
+    async def limiter(
+        request: Request,
+        identity: Identity = Depends(get_identity),
+    ) -> RateLimitResult:
+        limiter_impl = RateLimiter(request.app.state.redis, cap, rate)
+        ident = str(identity.user_id) if scope == "user" else str(identity.tenant_id)
+        key = ratelimit_key(str(identity.tenant_id), scope, ident)
+        result = await limiter_impl.check(key)
+        if not result.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="请求过于频繁，请稍后再试",
+                headers={"Retry-After": str(max(1, round(result.retry_after)))},
+            )
+        return result
+
+    return limiter

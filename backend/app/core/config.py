@@ -65,6 +65,24 @@ class Settings(BaseSettings):
     redis_socket_connect_timeout: float = 3.0  # 建连超时（秒）
     redis_health_check_interval: int = 30  # 空闲连接每隔 N 秒自检，剔除死连接
 
+    # —— 分布式锁 / 限流（M4）——
+    # 锁默认持有时长（毫秒）：太短活没干完就过期→两人持锁；太长持锁者崩了别人干等。
+    # 用"中等 TTL + 看门狗续期"破这个两难（见 infra/locks.py）。
+    lock_default_ttl_ms: int = 10_000
+    lock_blocking_timeout: float = 5.0  # 阻塞式获取锁的最长等待秒数，超时即放弃（快速失败）
+    lock_retry_interval: float = 0.05  # 阻塞获取时的轮询重试间隔（秒）
+
+    # 限流（令牌桶，按用户）：桶容量 + 每秒补充速率。容量决定可突发量，速率决定长期均值。
+    ratelimit_capacity: int = 20
+    ratelimit_refill_per_sec: float = 5.0
+
+    # —— 工具可靠性（M4，叠加在 M2 工具层）——
+    tool_timeout_s: float = 5.0  # 单个工具调用超时，卡死的下游不拖垮整轮
+    tool_max_retries: int = 2  # 重试次数（仅对幂等/只读工具生效；非幂等绝不重试）
+    tool_retry_base_delay: float = 0.1  # 指数退避基准秒数（实际还叠加随机抖动）
+    breaker_fail_threshold: int = 5  # 熔断阈值：连续失败这么多次就开路
+    breaker_cooldown_s: float = 10.0  # 熔断冷却：开路后多久进入半开探测
+
     # —— Qdrant（RAG 向量 + 语义记忆）——
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
