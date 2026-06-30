@@ -102,11 +102,15 @@ async def call_tool_resilient(
     args: dict,
     *,
     name: str,
+    config: dict | None = None,
     timeout: float | None = None,
     max_retries: int | None = None,
     base_delay: float | None = None,
 ) -> str:
     """带超时/重试/熔断地调用一个工具，返回结果字符串。
+
+    config：LangGraph 的 RunnableConfig（含 configurable.tenant_id 等身份）。传入时透传给
+    tool.ainvoke，工具（如 M5 的 RAG policy）据此做租户过滤；为 None 时按单参调用（兼容离线 stub）。
 
     抛出：CircuitOpen（开路，调用方降级）、ValidationError（参数错，模型自纠）、
     或最后一次的原始异常（重试耗尽）。
@@ -123,7 +127,9 @@ async def call_tool_resilient(
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
-            result = await asyncio.wait_for(tool.ainvoke(args), timeout)
+            # 有 config 就透传（真工具按 config.configurable 取租户）；没有则单参调用（stub/离线）
+            coro = tool.ainvoke(args, config) if config is not None else tool.ainvoke(args)
+            result = await asyncio.wait_for(coro, timeout)
             breaker.record_success()
             return str(result)
         except ValidationError:

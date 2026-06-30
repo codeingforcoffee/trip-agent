@@ -34,13 +34,16 @@ def test_all_six_tools_registered():
 
 
 def test_tools_are_deterministic():
-    """同输入同输出——这是 M8 离线评测可复现的地基。"""
+    """同输入同输出——这是 M8 离线评测可复现的地基。
+
+    注：query_travel_policy 自 M5 起改为 RAG 检索（异步 + 需 Qdrant + 租户身份），不再属于
+    "离线确定性"工具，故不在此列；它的行为由 test_m5_rag.py 的集成测试覆盖。
+    """
     cases = [
         ("search_flights", {"origin": "北京", "destination": "上海", "date": "2026-06-24"}),
         ("search_hotels", {"city": "上海", "checkin_date": "2026-06-24", "nights": 2}),
         ("search_trains", {"origin": "北京", "destination": "上海", "date": "2026-06-24"}),
         ("get_weather", {"city": "上海", "date": "2026-06-24"}),
-        ("query_travel_policy", {"question": "住宿费报销上限多少"}),
         (
             "estimate_expense",
             {"city": "上海", "days": 3, "hotel_price_per_night": 800, "transport_cost": 1200},
@@ -72,9 +75,6 @@ def test_results_shape():
     assert exp["hotel_cap_per_night"] == 600
     assert exp["warning"] is not None
     assert exp["total"] == exp["hotel_total"] + exp["meal_total"] + exp["transport_cost"]
-
-    policy = TOOLS_BY_NAME["query_travel_policy"].invoke({"question": "高铁能报一等座吗"})
-    assert "一等座" in policy
 
 
 def test_schema_validation_rejects_bad_args():

@@ -87,6 +87,21 @@ class Settings(BaseSettings):
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
 
+    # —— RAG / 本地 Embedding（M5）——
+    # 本地 BGE 中文嵌入模型，经 fastembed(ONNX) 运行——离线、免费、不依赖 torch。
+    # 同样的权重换 sentence-transformers 也能跑，向量一致，只是运行时更重。
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"  # 512 维，中文检索强
+    rag_collection: str = "rag"  # 政策文档语料的 Qdrant 集合名
+    rag_top_k: int = 4  # 检索返回的文档块数（拼进上下文给 LLM）
+    # 余弦相似度阈值：低于它视为"没检索到相关内容"→ 工具返回"未找到"，逼模型别瞎编。
+    # 实测 bge-small-zh：相关查询约 0.7~0.85，离题查询却也有 0.3~0.46（双编码器分数压在窄带，
+    # 这正是单靠 dense 检索的局限）。取 0.5 能较干净地切开本例的相关/离题；它是 precision/recall
+    # 的调节旋钮，真正的解法是 M5+ 的 cross-encoder 重排（对"查询+文档"联合打分，分数区分度高得多）。
+    rag_score_threshold: float = 0.5
+    # 结构感知切块的参数：单块最大字符数 + 相邻块重叠字符数（防边界句被腰斩）。
+    rag_chunk_max_chars: int = 450
+    rag_chunk_overlap: int = 60
+
     # —— DeepSeek（M1 接入）——
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"

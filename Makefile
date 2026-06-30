@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help up down ps logs sync run health test migrate revision seed lock-demo eval clean
+.PHONY: help up down ps logs sync run health test migrate revision seed ingest lock-demo eval clean
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -45,6 +45,9 @@ revision: ## 生成迁移（自动对比模型）：make revision M="描述"
 
 seed: ## 灌入演示数据：2 租户 + 用户（M3）
 	cd backend && uv run python scripts/seed.py
+
+ingest: ## 把样例政策文档灌入 Qdrant（M5 RAG，需先 seed + 起 qdrant）
+	cd backend && uv run python -m app.rag.ingest
 
 lock-demo: ## 分布式锁并发演示：互斥/临界区/TTL/看门狗（M4，需 Redis）
 	cd backend && uv run python scripts/lock_demo.py
