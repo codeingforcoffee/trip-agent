@@ -10,7 +10,6 @@ M1 只需要一个字段 messages（对话消息列表）：
   - 这也是为什么节点只需 `return {"messages": [新消息]}`，框架替你 append。
 
 后续里程碑会往这里加字段（都各带自己的 reducer），例如：
-  - summary: str          # M6 上下文压缩后的滚动摘要
   - tenant_id/user_id     # M3 多租户身份（也可放 config.configurable，见 graph.py 说明）
 """
 
@@ -23,7 +22,8 @@ from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
-    # 对话消息列表；reducer=add_messages 表示"追加合并"
+    # 对话消息列表；reducer=add_messages 表示"追加合并"。
+    # 注意：add_messages 还支持 RemoveMessage——M6a 的 compress 节点据此把被摘要掉的旧消息移除。
     messages: Annotated[list[AnyMessage], add_messages]
 
     # —— M2+ triage(分诊)节点写入的字段 ——
@@ -33,3 +33,8 @@ class AgentState(TypedDict):
     intent: NotRequired[str]  # 本轮意图分类：flight/hotel/policy/chitchat...
     slots: NotRequired[dict[str, str | None]]  # 抽到的槽位 origin/destination/date
     clarify_needs: NotRequired[list[str]]  # 需要向用户追问的点；非空则走 clarify
+
+    # —— M6a 上下文压缩写入的字段 ——
+    # 滚动摘要：被淘汰的旧消息被压缩进这里，每次重算覆盖（last-write-wins）。
+    # agent/triage 节点会把它作为一段上下文拼在 system 之后，于是压缩后仍不丢线索。
+    summary: NotRequired[str]

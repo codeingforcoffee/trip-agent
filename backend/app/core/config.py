@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     # 关掉则退回直连图、每轮省一次 LLM 调用，但不再主动澄清（靠 system prompt 自觉）。
     enable_triage: bool = True
 
+    # —— 上下文压缩（M6a）——
+    # 是否启用 compress 节点（关掉则不压缩，历史无限增长）。
+    enable_compress: bool = True
+    # 估算 token 超过它就触发压缩。设得远小于模型窗口，给本轮生成留足空间；
+    # 调小可在短对话里直接看到压缩触发（演示/测试用 CONTEXT_TOKEN_BUDGET 覆盖）。
+    context_token_budget: int = 6000
+    # 压缩时保留最近多少条原文，更早的摘要进 summary。
+    compress_keep_last: int = 6
+
     # —— JWT 鉴权（M3 引入）——
     # 默认值≥32 字节：HS256 的 HMAC 密钥短于 32 字节 pyjwt 会告警（且不安全）。
     # 这仍是显眼的占位串，生产务必用 `openssl rand -hex 32` 换掉。

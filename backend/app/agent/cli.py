@@ -52,7 +52,8 @@ async def run_turn(graph, config: dict, text: str) -> None:
         {"messages": [HumanMessage(content=text)]}, config, stream_mode="updates"
     ):
         for node, update in chunk.items():
-            _print_node_messages(node, update.get("messages", []))
+            # updates 模式下，无状态更新的节点（如未触发压缩的 compress）其 update 为 None，兜一下
+            _print_node_messages(node, (update or {}).get("messages", []))
 
 
 async def show_history(thread_id: str) -> None:
