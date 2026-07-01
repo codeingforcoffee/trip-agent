@@ -2,6 +2,7 @@
 import { reactive, ref, nextTick } from 'vue'
 import { auth, clearSession } from '../auth.js'
 import { chatStream, resumeStream, logout } from '../api.js'
+import { renderMarkdown } from '../markdown.js'
 
 // 一个浏览器会话固定一个会话 id → thread_id=tenant:user:conv 稳定，多轮对话有短期记忆。
 const convId = (crypto.randomUUID && crypto.randomUUID()) || `web-${Date.now()}`
@@ -102,8 +103,15 @@ async function onLogout() {
         <div v-if="m.tools && m.tools.length" class="events">
           <span v-for="(t, ti) in m.tools" :key="ti" class="event-chip">{{ t }}</span>
         </div>
-        <!-- 气泡：流式时带闪烁光标 -->
-        <div class="bubble" :class="{ cursor: m.streaming }">{{ m.text }}</div>
+        <!-- 气泡：assistant 走 Markdown 渲染（v-html + markdown-it 安全配置），user 原样显示。
+             流式时带闪烁光标。 -->
+        <div
+          v-if="m.role === 'assistant'"
+          class="bubble markdown"
+          :class="{ cursor: m.streaming }"
+          v-html="renderMarkdown(m.text)"
+        ></div>
+        <div v-else class="bubble" :class="{ cursor: m.streaming }">{{ m.text }}</div>
         <!-- RAG 引用 -->
         <div v-for="(c, ci) in m.citations || []" :key="ci" class="citation">📎 {{ c }}</div>
         <!-- HITL 高危动作确认 -->
