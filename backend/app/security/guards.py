@@ -157,3 +157,57 @@ def mask_pii(text: str) -> tuple[str, list[str]]:
     for pat, label in _PII_RULES:
         out = pat.sub(_make_repl(label), out)
     return out, found
+
+
+# ———————————————————————————— 流式 PII 脱敏（M9a）————————————————————————————
+# 问题：SSE 把 LLM 的 token 增量实时转发给前端，若直接转发，PII 会在 guard_output 脱敏
+# 【之前】就流到客户端（过了网就补救不了）；且一个手机号常被切成多个 token，逐 token
+# 脱敏必漏。mask_pii 是【批量】的，套不上流。
+#
+# 解法：**回看缓冲 + 只在安全边界 flush**。我们的 PII 模式（手机/邮箱/身份证/卡号）都是
+# 【无空格的连续 ASCII/数字串】——只要遇到一个"非 PII 续接字符"（中文字、空格、标点…），
+# 它一定终结了一个完整的 PII 串。所以：把边界字符之前的"安全前缀"脱敏后吐出，尚未闭合的
+# 尾部 PII 串（如刚吐到 "138"）留在缓冲里等后续 token——永不会把 PII 从中间切开漏出去。
+# 中文答复满是中文字/标点 → flush 点密集，打字机效果不受影响。
+#
+# _PII_CONT：可能出现在任一 PII 模式内部的字符集合（数字 + 字母 + 邮箱的 @ . - + _）。
+# 不在此集合的字符即"安全边界"。宁可把边界判宽（多留几字符在缓冲），也不漏。
+_PII_CONT = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@.-+_")
+
+
+class StreamRedactor:
+    """流式 PII 脱敏器：喂 token 增量，吐出【已脱敏且安全】的增量；结束时 flush 余量。
+
+    用法：
+        red = StreamRedactor()
+        async for tok in stream:
+            out = red.feed(tok)      # 可能为空串（尾部还是未闭合的 PII 候选串，先攒着）
+            if out: emit(out)
+        tail = red.flush()           # 把缓冲里剩下的全部脱敏吐出
+        if tail: emit(tail)
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        """追加增量，返回可安全吐出的已脱敏前缀（无安全边界时返回空串，攒进缓冲）。"""
+        if text:
+            self._buf += text
+        # 找最后一个"安全边界"（非 PII 续接字符）的位置：它及之前都可安全脱敏吐出，
+        # 之后是尚未闭合的 PII 候选串，必须留在缓冲等下一个 token。
+        cut = 0
+        for i, ch in enumerate(self._buf):
+            if ch not in _PII_CONT:
+                cut = i + 1
+        if cut == 0:
+            return ""
+        safe, self._buf = self._buf[:cut], self._buf[cut:]
+        masked, _ = mask_pii(safe)
+        return masked
+
+    def flush(self) -> str:
+        """流结束时调用：把缓冲里剩余内容（可能含末尾的完整 PII）脱敏后全部吐出。"""
+        masked, _ = mask_pii(self._buf)
+        self._buf = ""
+        return masked

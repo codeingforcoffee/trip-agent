@@ -30,6 +30,7 @@ dependencies = [
     "pyjwt>=2.9",          # JWT 签发/校验（身份令牌）
     "bcrypt>=4.2",         # 密码哈希（直连，不走 passlib，避免 passlib/bcrypt 版本兼容坑）
     "fastembed>=0.8.0",
+    "httpx>=0.27",         # 动态配置的 Apollo 客户端 HTTP 调用（M9，懒导入，未启用 Apollo 则不触发）
 ]
 
 [dependency-groups]

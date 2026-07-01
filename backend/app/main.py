@@ -16,11 +16,15 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from qdrant_client import AsyncQdrantClient
 
+from app.agent.checkpointer import build_checkpointer_pool
 from app.api import auth as auth_api
+from app.api import chat as chat_api
 from app.api import conversations as conversations_api
 from app.core.config import settings
+from app.core.dynamic_config import DynamicCORSMiddleware, dynamic_config
 from app.core.logging import get_logger, setup_logging
 from app.db import session as db
 from app.infra import redis_client as rds
@@ -50,19 +54,51 @@ async def lifespan(app: FastAPI):
     app.state.redis = rds.build_redis_client(app.state.redis_pool)
     # Qdrant
     app.state.qdrant = AsyncQdrantClient(url=settings.qdrant_url)
+    # M9：短期记忆 checkpointer（连接池版）+ 懒构建的 Agent 图。
+    #   - 图本身懒构建（首个 /chat 请求，见 api/chat._get_graph）：图依赖 LLM，缺 key
+    #     不该阻断应用启动（延续 M0“降级不阻断”）；
+    #   - checkpointer 依赖 Postgres（核心依赖），此处建池并建表。open(wait=False) 后台填连接、
+    #     不阻塞启动；setup() 建表失败（如 Postgres 未起）只告警，不炸启动。
+    app.state.agent_graph = None
+    app.state.checkpointer = None
+    app.state.checkpointer_pool = build_checkpointer_pool()
+    await app.state.checkpointer_pool.open(wait=False)
+    try:
+        saver = AsyncPostgresSaver(app.state.checkpointer_pool)
+        await saver.setup()
+        app.state.checkpointer = saver
+        log.info("app.checkpointer_ready")
+    except Exception as e:  # noqa: BLE001 —— 依赖未就绪不阻断启动，由 /health 与首个 /chat 暴露
+        log.warning("app.checkpointer_setup_failed", error=repr(e))
+    # 动态配置层（M9）：启用 Apollo 时在此接通并起后台热更新轮询；否则只用 env（零成本）。
+    await dynamic_config.start()
     yield
     log.info("app.shutdown")
+    await dynamic_config.stop()
     await app.state.redis.aclose()
     await app.state.redis_pool.aclose()
     await app.state.qdrant.close()
+    await app.state.checkpointer_pool.close()
     await app.state.db_engine.dispose()  # 关闭池里所有连接
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+# CORS（M9）：用【热更新版】中间件——白名单每请求从 dynamic_config 实时读（默认 env 兜底，
+# 开了 Apollo 则由配置中心覆盖且改动秒级生效、无需重启）。allow_credentials=True 让前端能带凭证。
+app.add_middleware(
+    DynamicCORSMiddleware,
+    config=dynamic_config,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 业务路由（M3）：登录发 JWT + 租户态会话增查
 app.include_router(auth_api.router)
 app.include_router(conversations_api.router)
+# 流式对话（M9a）：SSE /chat + /chat/resume
+app.include_router(chat_api.router)
 
 
 async def _check_postgres() -> dict[str, Any]:

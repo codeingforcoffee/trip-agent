@@ -160,6 +160,25 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
+    # —— 全栈打通（M9）——
+    # FastAPI 版 checkpointer 用【连接池】而非单连接：Web 服务并发请求多，而 psycopg
+    # 单条连接不能跨协程并发共用（CLI 每进程一条连接够用，Web 不行）。见 agent/checkpointer.py。
+    checkpointer_pool_size: int = 10
+    # 前端(Vue/Vite dev server)与后端跨源，浏览器要 CORS 放行。生产应收紧到真实域名。
+    # 这是 env 兜底值；开了 Apollo 后，配置中心里的 cors_origins 会覆盖它并支持热更新。
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # —— 动态配置 / 配置中心（M9，可选 Apollo）——
+    # 分层理念：静态配置(连接串/密钥)仍归 pydantic；只有需要【热更新】的子集(CORS/限流/开关)走 Apollo。
+    # 默认【关】：只用 env，零额外依赖、不必跑 Apollo。开了才叠加，且 Apollo 不可达自动回退 env。
+    apollo_enabled: bool = False
+    apollo_meta: str = "http://localhost:8080"  # Apollo meta/Config Service 地址
+    apollo_app_id: str = "trip-agent"
+    apollo_cluster: str = "default"
+    apollo_namespace: str = "application"
+    apollo_secret: str = ""  # 命名空间访问密钥（开了访问控制才需要），用于 HMAC 签名；空=不签名
+    apollo_poll_interval: float = 5.0  # 兜底轮询间隔秒（热更新）
+
     # —— 下面这些"连接串"是由上面的零件拼出来的（@property），
     #     避免在 .env 里重复写主机/端口，单一事实来源。——
 
