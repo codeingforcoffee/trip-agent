@@ -27,6 +27,7 @@ from app.agent.graph import build_graph
 from app.agent.tools import ALL_TOOLS
 from app.core.logging import setup_logging
 from app.llm.deepseek import get_llm
+from app.security.guards import mask_pii
 
 
 def _truncate(s: str, n: int = 200) -> str:
@@ -35,13 +36,19 @@ def _truncate(s: str, n: int = 200) -> str:
 
 
 def _print_node_messages(node: str, messages: list) -> None:
-    """把图每一步的输出渲染成人类可读的过程，方便看清 ReAct 循环。"""
+    """把图每一步的输出渲染成人类可读的过程，方便看清 ReAct 循环。
+
+    M7b：AIMessage 内容在**显示层**再脱一道 PII。因为流式(updates)先吐出 agent 原文、
+    再由 guard_output 节点产出脱敏版；直接打印原文会让 PII 一闪而过。故显示前先 mask，
+    并在 run_turn 里跳过 guard_output 的重复回显（它只负责持久态与审计）。
+    """
     for m in messages:
         if isinstance(m, AIMessage):
             for call in m.tool_calls or []:
                 print(f"  🤔 [agent] 决定调用工具 {call['name']}({call['args']})")
             if m.content:
-                print(f"\n🤖 助手> {m.content}")
+                shown, _ = mask_pii(str(m.content))
+                print(f"\n🤖 助手> {shown}")
         elif isinstance(m, ToolMessage):
             print(f"  🔧 [tools] {m.name} 返回: {_truncate(str(m.content))}")
 
@@ -76,6 +83,8 @@ async def run_turn(graph, config: dict, text: str) -> None:
             for node, update in chunk.items():
                 if node == "__interrupt__":
                     resume_with = Command(resume=await _ask_confirm(update))
+                elif node == "guard_output":
+                    continue  # 出口护栏只更新持久态+审计；最终答复已在 agent 步以脱敏形式打印过
                 else:
                     # updates 模式下，无状态更新的节点（如未触发压缩的 compress）其 update 为 None，兜一下
                     _print_node_messages(node, (update or {}).get("messages", []))

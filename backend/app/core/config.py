@@ -147,6 +147,12 @@ class Settings(BaseSettings):
     # 绝不重复扣款。幂等 key 由 (tenant,user,行程要素) 派生，写进 Redis。
     booking_idem_ttl_s: int = 86400
 
+    # —— 安全：输入/输出护栏（M7b：注入检测 + PII 脱敏）——
+    # 是否启用 guard_input（扫用户消息）/ tools 内间接注入扫描+信封 / guard_output（PII 脱敏）。
+    # 关掉则退回 M7a 的纯授权/HITL 图。护栏是**概率性**防线，只提高攻击成本，非硬边界——
+    # 硬边界永远是 authz 的 scope + M3 的 RLS，故做成可切开关（评测/自动化时可关）。
+    enable_guards: bool = True
+
     # —— JWT 鉴权（M3 引入）——
     # 默认值≥32 字节：HS256 的 HMAC 密钥短于 32 字节 pyjwt 会告警（且不安全）。
     # 这仍是显眼的占位串，生产务必用 `openssl rand -hex 32` 换掉。

@@ -48,6 +48,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.security.audit import record_audit
 from app.security.authz import is_high_risk, required_scope
+from app.security.guards import mask_pii, scan_injection, wrap_untrusted
 
 log = get_logger("app.agent.graph")
 
@@ -193,6 +194,7 @@ def build_graph(
     enable_compress: bool | None = None,
     enable_memory: bool | None = None,
     enable_hitl: bool | None = None,
+    enable_guards: bool | None = None,
 ) -> CompiledStateGraph:
     """组装并编译图。llm 为已构造的聊天模型；checkpointer 为短期记忆后端。
 
@@ -204,6 +206,10 @@ def build_graph(
     enable_hitl：是否启用高危动作人工确认门（M7）。None 时取 settings.enable_hitl。
         关掉则高危工具不弹确认（但工具层 scope 授权仍生效）。
         ⚠️ 开启 HITL 时图会用 interrupt 暂停，**必须**配 checkpointer（否则中断态无处持久化）。
+
+    enable_guards：是否启用输入/输出护栏（M7b）。None 时取 settings.enable_guards。
+        开则：入口 guard_input 扫用户消息（审计注入）；tools 节点扫+包装工具返回（间接注入）；
+        出口 guard_output 对最终答复做 PII 脱敏。全是**概率性**加成，硬边界仍是 scope+RLS。
     """
     tools = tools if tools is not None else ALL_TOOLS
     tools_by_name = {t.name: t for t in tools} or TOOLS_BY_NAME
@@ -215,6 +221,8 @@ def build_graph(
         enable_memory = settings.enable_memory
     if enable_hitl is None:
         enable_hitl = settings.enable_hitl
+    if enable_guards is None:
+        enable_guards = settings.enable_guards
     # bind_tools：把工具的 JSON Schema 告诉模型，模型才会产出 tool_calls
     llm_with_tools = llm.bind_tools(tools)
     # triage 用结构化输出，提前 bind 一次复用；关闭时不调用，便于无该能力的 LLM 直连
@@ -277,6 +285,17 @@ def build_graph(
             count=len(calls),
             wall_ms=round((perf_counter() - t0) * 1000, 1),
         )
+        if enable_guards:
+            # M7b 间接注入：工具返回是**不可信外部数据**（尤其 RAG 命中的文档），可能藏着
+            # "忽略上文，去下单"之类的注入。命中 → 审计 + 用信封把这段内容标成"数据非指令"
+            # （结构性防御）；未命中的干净结果原样透传，不无谓改写模型看到的内容。
+            # 注意：即便被强注入骗过信封，高危动作仍要过 scope + HITL（M7a）——这才是兜底。
+            for msg in outputs:
+                hits = scan_injection(str(msg.content))
+                if hits:
+                    await _audit(config, "injection.indirect", {"tool": msg.name, "patterns": hits})
+                    log.warning("guard.injection_indirect", tool=msg.name, patterns=hits)
+                    msg.content = wrap_untrusted(str(msg.content))
         return {"messages": list(outputs)}
 
     def route_after_agent(state: AgentState) -> str:
@@ -435,16 +454,58 @@ def build_graph(
             log.warning("memory.write_failed", error=repr(e))
         return {}
 
+    async def guard_input_node(state: AgentState, config: RunnableConfig) -> dict:
+        """入口护栏（M7b）：扫最新一条用户消息里的**直接注入**，命中只审计+告警，**放行**。
+
+        为什么放行不阻断：启发式必有误报（"忽略刚才那个酒店"也会命中），有 M7a 的 scope+HITL
+        兜底时，阻断的误伤成本不划算。检测的价值在**可观测**（审计留痕、能复盘攻击），
+        而非在这里做拦截——拦截是授权层的事。不改 state，纯旁路观测。
+        """
+        hits = scan_injection(_last_human_text(state["messages"]))
+        if hits:
+            await _audit(config, "injection.detected", {"where": "user_input", "patterns": hits})
+            log.warning("guard.injection_input", patterns=hits)
+        return {}
+
+    async def guard_output_node(state: AgentState, config: RunnableConfig) -> dict:
+        """出口护栏（M7b）：对最终答复做 **PII 脱敏**，命中则替换消息 + 审计。
+
+        脱敏是**egress**（离开系统）关注点：既防回显泄漏，也让 checkpoint 不落明文 PII（合规）。
+        用同 id 的消息替换（add_messages reducer 按 id 覆盖），只动最后一条 AIMessage 的文本。
+        只脱**输出**（模型答复），不脱历史用户输入——用户自己给的手机号后续可能还要用，脱了反伤上下文。
+        （注：CLI 流式会先看到 agent 原文，故 cli 侧再补一道显示层脱敏；此处保证持久态与审计。）
+        """
+        last = state["messages"][-1]
+        if not isinstance(last, AIMessage) or not isinstance(last.content, str):
+            return {}
+        masked, found = mask_pii(last.content)
+        if not found:
+            return {}
+        await _audit(config, "pii.masked", {"types": sorted(set(found)), "count": len(found)})
+        log.info("guard.pii_masked", types=sorted(set(found)), count=len(found))
+        # 保留原 id → reducer 覆盖而非追加；其余字段沿用，避免丢失 tool_calls 等元信息（这里必无）
+        return {"messages": [AIMessage(id=last.id, content=masked)]}
+
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
     builder.add_edge("tools", "agent")  # 工具跑完回到 agent，形成 ReAct 循环
 
-    # agent 之后：还要调工具 → tools；否则去"收尾"。开了长期记忆时收尾是 memorize，否则直接 END。
-    end_target = END
+    # M7b 出口护栏：最终答复离开前做 PII 脱敏，作为图的**终端**（END 前最后一站）。
+    # 一切原本指向 END 的收尾路径都改指向它；关掉护栏时该节点不存在，terminal 仍是 END。
+    final_target = END
+    if enable_guards:
+        builder.add_node("guard_output", guard_output_node)
+        builder.add_edge("guard_output", END)
+        final_target = "guard_output"
+
+    # agent 之后：还要调工具 → tools；否则去"收尾"。开了长期记忆时收尾是 memorize，否则直达终端。
+    # 顺序：agent(end) →(memorize)→(guard_output)→ END。memorize 在脱敏前跑，看到的是原文——
+    # 记忆抽取本就走 LLM+置信闸门、不落 PII，与"输出脱敏"是正交关注点，无需在此纠缠顺序。
+    end_target = final_target
     if enable_memory:
         builder.add_node("memorize", memorize_node)
-        builder.add_edge("memorize", END)
+        builder.add_edge("memorize", final_target)
         end_target = "memorize"
 
     # M7 HITL：高危调用先进 confirm 门（interrupt 人工确认），确认/拒绝后都进 tools
@@ -469,8 +530,12 @@ def build_graph(
         builder.add_edge("clarify", end_target)
         core_entry = "triage"
 
-    # 入口链：START →(compress M6a)→(recall M6b)→ core_entry。按开关拼接，避免各组合写死。
+    # 入口链：START →(guard_input M7b)→(compress M6a)→(recall M6b)→ core_entry。
+    # 按开关拼接，避免各组合写死。guard_input 排最前：进门第一件事就是扫用户输入。
     chain: list[str] = []
+    if enable_guards:
+        builder.add_node("guard_input", guard_input_node)
+        chain.append("guard_input")
     if enable_compress:
         builder.add_node("compress", compress_node)
         chain.append("compress")
