@@ -24,8 +24,10 @@ node_modules/
 frontend/dist/
 
 # —— 评测产物（M8）——
-eval/reports/
-eval/cassettes/*.local.*
+# 报告是每次跑生成的（含时间戳，会 churn）→ 不入库；cassette 要入库（make eval 回放要靠它），
+# 但 *.local.* 命名的本地临时录制不入库。注意 eval 在 backend/ 下，路径要带 backend/ 前缀才匹配得到。
+backend/eval/reports/
+backend/eval/cassettes/*.local.*
 
 # —— IDE / OS ——
 .vscode/

@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help up down ps logs sync run health test migrate revision seed ingest lock-demo eval clean
+.PHONY: help up down ps logs sync run health test migrate revision seed ingest lock-demo eval eval-live eval-record clean
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -52,8 +52,14 @@ ingest: ## 把样例政策文档灌入 Qdrant（M5 RAG，需先 seed + 起 qdran
 lock-demo: ## 分布式锁并发演示：互斥/临界区/TTL/看门狗（M4，需 Redis）
 	cd backend && uv run python scripts/lock_demo.py
 
-eval: ## 离线评测（M8 引入）
-	cd backend && uv run python -m eval.run_eval
+eval: ## 离线评测·回放模式（M8，默认；LLM 走 cassette，离线/确定/免费）
+	cd backend && uv run python -m eval.run_eval --mode replay
+
+eval-live: ## 离线评测·真跑 DeepSeek（评当前 prompt 质量，不写 cassette）
+	cd backend && uv run python -m eval.run_eval --mode live
+
+eval-record: ## 离线评测·录制 cassette（真跑并把 LLM 响应按序录下，供 make eval 回放）
+	cd backend && uv run python -m eval.run_eval --mode record
 
 clean: ## 停止容器并删除数据卷（清空所有数据！）
 	$(COMPOSE) down -v
