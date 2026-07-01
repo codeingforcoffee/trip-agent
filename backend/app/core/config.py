@@ -139,6 +139,14 @@ class Settings(BaseSettings):
     memory_dedup_threshold: float = 0.9  # 写入去重：与已有记忆相似超过它则视为重复、不再写
     memory_min_confidence: float = 0.6  # 抽取候选的置信度闸门，低于它不落库（宁缺毋滥）
 
+    # —— 安全：高危动作 HITL + 幂等（M7）——
+    # 高危工具（下单/取消）执行前是否走 LangGraph interrupt 人工确认。
+    # 关掉则不弹确认（授权 scope 校验仍生效）——把"人在环路"做成可切的开关，便于自动化/评测。
+    enable_hitl: bool = True
+    # 下单幂等结果的留存秒数（默认 24h）：同一"下单意图"在此窗口内重放，直接返回原订单，
+    # 绝不重复扣款。幂等 key 由 (tenant,user,行程要素) 派生，写进 Redis。
+    booking_idem_ttl_s: int = 86400
+
     # —— JWT 鉴权（M3 引入）——
     # 默认值≥32 字节：HS256 的 HMAC 密钥短于 32 字节 pyjwt 会告警（且不安全）。
     # 这仍是显眼的占位串，生产务必用 `openssl rand -hex 32` 换掉。

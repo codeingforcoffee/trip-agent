@@ -1,7 +1,7 @@
 """M6b 测试：长期记忆。
 
-  1. 离线：抽取候选的**闸门与路由**（置信度过滤、preference→表 / fact→向量库）——用替身，不碰 DB/网络；
-  2. 集成：偏好 upsert（recency wins）+ 语义记忆去重/召回 + 跨租户隔离（需 Postgres + Qdrant）。
+1. 离线：抽取候选的**闸门与路由**（置信度过滤、preference→表 / fact→向量库）——用替身，不碰 DB/网络；
+2. 集成：偏好 upsert（recency wins）+ 语义记忆去重/召回 + 跨租户隔离（需 Postgres + Qdrant）。
 """
 
 from __future__ import annotations
@@ -95,7 +95,9 @@ async def ids():
             alice = (
                 await conn.execute(select(User.id).where(User.email == "alice@acme.com"))
             ).first()
-            bob = (await conn.execute(select(User.id).where(User.email == "bob@globex.com"))).first()
+            bob = (
+                await conn.execute(select(User.id).where(User.email == "bob@globex.com"))
+            ).first()
         await engine.dispose()
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"需要 Postgres（make up + seed）：{e!r}")

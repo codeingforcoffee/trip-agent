@@ -13,6 +13,8 @@ M4 的分布式锁 / 限流都从这个池借连接。
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import redis.asyncio as aioredis
 
 from app.core.config import settings
@@ -33,6 +35,18 @@ def build_redis_pool() -> aioredis.ConnectionPool:
 def build_redis_client(pool: aioredis.ConnectionPool) -> aioredis.Redis:
     """共用同一个池创建 client。可创建多个 client 共享一个池。"""
     return aioredis.Redis(connection_pool=pool)
+
+
+@lru_cache(maxsize=1)
+def get_redis_client() -> aioredis.Redis:
+    """进程内共享的 Redis client 单例（懒建）。
+
+    给**没有 app.state 池**的场景用——图/CLI 里的高危工具要拿锁、写幂等 key。
+    与 M0 在 FastAPI lifespan 建的 app.state 池同理（redis-py 的 client 本身即一个池），
+    这里只是在 CLI/图进程里再开一个小池，无伤大雅；M9 接 FastAPI 时可改为经 config 复用
+    app.state 的池。测试用 get_redis_client.cache_clear() 重置（换事件循环时必须清）。
+    """
+    return build_redis_client(build_redis_pool())
 
 
 def pool_stats(pool: aioredis.ConnectionPool) -> dict[str, int]:

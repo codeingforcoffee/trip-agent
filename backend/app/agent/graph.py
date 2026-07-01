@@ -30,6 +30,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 
 from app.agent import memory
 from app.agent.context import latest_usage_tokens, make_llm_summarizer, maybe_compress
@@ -45,6 +46,8 @@ from app.agent.triage import (
 )
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.security.audit import record_audit
+from app.security.authz import is_high_risk, required_scope
 
 log = get_logger("app.agent.graph")
 
@@ -95,11 +98,31 @@ def _last_human_text(messages: list[AnyMessage]) -> str:
 
 
 def should_continue(state: AgentState) -> str:
-    """条件边：看最后一条 AI 消息有没有要调的工具。"""
+    """条件边：看最后一条 AI 消息有没有要调的工具。（M1 版；M7 的 HITL 路由见 build_graph 内闭包。）"""
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
         return "tools"
     return "end"
+
+
+def _ctx(config: dict | None) -> tuple[str | None, str | None, list[str]]:
+    """从 RunnableConfig.configurable 取(可信)身份三元组：tenant_id / user_id / scopes。
+
+    这些由**可信调用方**（API 依赖 / CLI）设定，模型碰不到——授权与租户过滤的安全根基。
+    """
+    cfg = (config or {}).get("configurable") or {}
+    return cfg.get("tenant_id"), cfg.get("user_id"), (cfg.get("scopes") or [])
+
+
+async def _audit(config: dict | None, action: str, detail: dict) -> None:
+    """安全地写一条审计：无身份则跳过；写失败只记日志，绝不阻断主流程（拦截在前、审计在后）。"""
+    tenant_id, user_id, _ = _ctx(config)
+    if not tenant_id:
+        return
+    try:
+        await record_audit(str(tenant_id), user_id and str(user_id), action, detail)
+    except Exception as e:  # noqa: BLE001 —— 审计失败不能连累用户请求
+        log.warning("audit.write_failed", action=action, error=repr(e))
 
 
 async def _run_tool_call(
@@ -114,6 +137,9 @@ async def _run_tool_call(
     config（M5）：透传 LangGraph 的 RunnableConfig，让工具能从 config.configurable 读租户身份
     （如 RAG policy 的租户过滤）。模型看不到也改不了它——租户隔离的安全根基。
 
+    M7 授权门：**在真正执行前**校验用户 scope（确定性硬边界）。这一层是权威 enforcement——
+    即便 HITL 的 confirm 节点因某种原因放过了无权动作，这里仍会 fail-closed 拒绝并审计。
+
     抽成模块级函数（而非闭包）是为了能离线单测：直接喂一个 call dict 验证行为。
     """
     name = call["name"]
@@ -121,6 +147,18 @@ async def _run_tool_call(
     if tool is None:
         # 模型幻觉出一个不存在的工具名时，告诉它而不是崩溃
         return ToolMessage(content=f"错误：未知工具 {name}", tool_call_id=call["id"], name=name)
+    # —— M7 工具授权（fail-closed）：需要 scope 但用户不具备 → 拒绝执行 + 审计越权尝试 ——
+    needed = required_scope(name)
+    if needed:
+        _, _, scopes = _ctx(config)
+        if needed not in scopes:
+            await _audit(config, "tool.denied", {"tool": name, "needed": needed})
+            log.warning("authz.denied", tool=name, needed=needed)
+            return ToolMessage(
+                content=f"无权限：调用「{name}」需要「{needed}」权限，当前账号不具备，已拒绝执行。",
+                tool_call_id=call["id"],
+                name=name,
+            )
     t0 = perf_counter()
     try:
         # M4：经可靠性封装调用——超时 + 重试(仅幂等) + 熔断。参数校验失败仍抛 ValidationError，
@@ -140,6 +178,9 @@ async def _run_tool_call(
         ok=ok,
         elapsed_ms=round((perf_counter() - t0) * 1000, 1),
     )
+    # M7：高危动作一旦真正执行，落一条审计（事后对账/举证）。只在成功时记，失败已在日志里。
+    if ok and is_high_risk(name):
+        await _audit(config, "tool.executed", {"tool": name, "args": call["args"]})
     # ToolMessage 必须带 tool_call_id，框架据此把结果与那次调用配对
     return ToolMessage(content=content, tool_call_id=call["id"], name=name)
 
@@ -151,6 +192,7 @@ def build_graph(
     enable_triage: bool | None = None,
     enable_compress: bool | None = None,
     enable_memory: bool | None = None,
+    enable_hitl: bool | None = None,
 ) -> CompiledStateGraph:
     """组装并编译图。llm 为已构造的聊天模型；checkpointer 为短期记忆后端。
 
@@ -159,6 +201,9 @@ def build_graph(
 
     enable_compress：是否启用上下文压缩入口节点（M6a）。None 时取 settings.enable_compress。
     enable_memory：是否启用长期记忆（recall 入口 + memorize 收尾）（M6b）。None 时取 settings.enable_memory。
+    enable_hitl：是否启用高危动作人工确认门（M7）。None 时取 settings.enable_hitl。
+        关掉则高危工具不弹确认（但工具层 scope 授权仍生效）。
+        ⚠️ 开启 HITL 时图会用 interrupt 暂停，**必须**配 checkpointer（否则中断态无处持久化）。
     """
     tools = tools if tools is not None else ALL_TOOLS
     tools_by_name = {t.name: t for t in tools} or TOOLS_BY_NAME
@@ -168,6 +213,8 @@ def build_graph(
         enable_compress = settings.enable_compress
     if enable_memory is None:
         enable_memory = settings.enable_memory
+    if enable_hitl is None:
+        enable_hitl = settings.enable_hitl
     # bind_tools：把工具的 JSON Schema 告诉模型，模型才会产出 tool_calls
     llm_with_tools = llm.bind_tools(tools)
     # triage 用结构化输出，提前 bind 一次复用；关闭时不调用，便于无该能力的 LLM 直连
@@ -192,17 +239,36 @@ def build_graph(
         return {"messages": [response]}
 
     async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, list[AnyMessage]]:
-        """tools 节点：**并发**执行最后一条 AI 消息里的所有 tool_calls。
+        """tools 节点：**并发**执行待处理的 tool_calls（跳过已被回应的）。
 
         asyncio.gather 同时发起所有工具调用并等它们全部完成；它**保持顺序**，
         返回的 ToolMessage 与 tool_calls 一一对应（顺序不能乱，否则 id 配对会错）。
         对比日志里每个工具的 elapsed_ms 之和 与 这里的 wall_ms：并发下 wall_ms ≈
         最慢的那个工具，而非各工具之和——这就是 fan-out 的收益。
 
+        为什么不再直接取 messages[-1].tool_calls（M7 起）：HITL 的 confirm 节点在用户
+        **拒绝**高危动作时，会先替那些调用补上"已取消"的 ToolMessage，此时 messages[-1]
+        已不是那条 AIMessage。所以改为：回溯到最近一条带 tool_calls 的 AIMessage，只执行
+        其中**尚未被回应**（无对应 ToolMessage）的调用——天然幂等，重入也不会重复执行。
+
         config（M5）：LangGraph 把运行时配置作为第二参数注入节点；这里把它透传给每个工具，
-        让 RAG 等工具能读到 config.configurable.tenant_id 做租户过滤。
+        让 RAG/高危工具能读到 config.configurable 的租户身份与 scope。
         """
-        calls = state["messages"][-1].tool_calls
+        msgs = state["messages"]
+        ai = next(
+            (
+                m
+                for m in reversed(msgs)
+                if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+            ),
+            None,
+        )
+        if ai is None:
+            return {}
+        answered = {m.tool_call_id for m in msgs if isinstance(m, ToolMessage)}
+        calls = [c for c in ai.tool_calls if c["id"] not in answered]
+        if not calls:
+            return {}
         t0 = perf_counter()
         log.info("tools.fanout_start", count=len(calls), tools=[c["name"] for c in calls])
         outputs = await asyncio.gather(*(_run_tool_call(c, tools_by_name, config) for c in calls))
@@ -212,6 +278,61 @@ def build_graph(
             wall_ms=round((perf_counter() - t0) * 1000, 1),
         )
         return {"messages": list(outputs)}
+
+    def route_after_agent(state: AgentState) -> str:
+        """agent 之后的路由（M7 超集）：有高危调用且开了 HITL → 先过确认门；否则同 should_continue。"""
+        last = state["messages"][-1]
+        calls = getattr(last, "tool_calls", None) or []
+        if not calls:
+            return "end"
+        if enable_hitl and any(is_high_risk(c["name"]) for c in calls):
+            return "confirm"
+        return "tools"
+
+    async def confirm_node(state: AgentState, config: RunnableConfig) -> dict:
+        """HITL 确认门（M7）：对**有权且高危**的调用请求人工确认，批准才放行执行。
+
+        interrupt 机制（面试要点）：它把图暂停、当前 State 存进 checkpointer、把 payload 抛给
+        调用方；调用方 Command(resume=decision) 恢复后，**本节点从头重跑**，这次 interrupt()
+        直接返回 decision。因为会重跑，**interrupt 之前绝不能有副作用**（审计/写库都放到它之后）。
+
+        只对"有权 + 高危"的调用弹确认：无权的不必确认（注定被工具层拒），交给 tools 节点里的
+        授权门 fail-closed。批准 → 返回 {} 放行到 tools；拒绝 → 给这些调用补"已取消"的 ToolMessage
+        （每个 tool_call 都必须被回应，否则下一次喂 LLM 会报错）+ 审计，低危调用仍会在 tools 执行。
+        """
+        ai = state["messages"][-1]
+        calls = ai.tool_calls or []
+        _, _, scopes = _ctx(config)
+        to_confirm = [
+            c for c in calls if is_high_risk(c["name"]) and (required_scope(c["name"]) in scopes)
+        ]
+        if not to_confirm:
+            return {}  # 没有"有权的高危调用"→ 无需确认，直接进 tools（无权的由授权门处理）
+
+        decision = interrupt(
+            {
+                "type": "confirm_high_risk",
+                "message": "以下高危操作将被执行，请确认（approve/reject）：",
+                "actions": [{"tool": c["name"], "args": c["args"]} for c in to_confirm],
+            }
+        )
+        approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
+        if approved:
+            log.info("hitl.approved", tools=[c["name"] for c in to_confirm])
+            return {}  # 放行：进 tools 执行（工具内部还有幂等+锁兜底重复执行）
+
+        await _audit(config, "hitl.rejected", {"actions": [c["name"] for c in to_confirm]})
+        log.info("hitl.rejected", tools=[c["name"] for c in to_confirm])
+        return {
+            "messages": [
+                ToolMessage(
+                    content="用户已拒绝该高危操作，未执行。",
+                    tool_call_id=c["id"],
+                    name=c["name"],
+                )
+                for c in to_confirm
+            ]
+        }
 
     async def triage_node(state: AgentState) -> dict:
         """分诊节点（M2+）：用结构化输出从**整段对话**抽意图+槽位，算出待澄清点。
@@ -325,7 +446,15 @@ def build_graph(
         builder.add_node("memorize", memorize_node)
         builder.add_edge("memorize", END)
         end_target = "memorize"
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": end_target})
+
+    # M7 HITL：高危调用先进 confirm 门（interrupt 人工确认），确认/拒绝后都进 tools
+    # （tools 会跳过已被 confirm 回应的调用）。关掉 HITL 时不建此节点、路由也不会指向它。
+    route_map = {"tools": "tools", "end": end_target}
+    if enable_hitl:
+        builder.add_node("confirm", confirm_node)
+        builder.add_edge("confirm", "tools")
+        route_map["confirm"] = "confirm"
+    builder.add_conditional_edges("agent", route_after_agent, route_map)
 
     # triage/clarify（M2+）
     core_entry = "agent"

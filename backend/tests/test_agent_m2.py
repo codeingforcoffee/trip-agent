@@ -19,15 +19,19 @@ from app.agent.graph import _run_tool_call
 from app.agent.tools import ALL_TOOLS, TOOLS_BY_NAME
 
 
-def test_all_six_tools_registered():
+def test_all_tools_registered():
     names = {t.name for t in ALL_TOOLS}
     assert names == {
+        # M2 只读六件套
         "search_flights",
         "search_hotels",
         "search_trains",
         "get_weather",
         "query_travel_policy",
         "estimate_expense",
+        # M7 高危两件（授权 + HITL + 幂等）
+        "book_trip",
+        "cancel_booking",
     }
     # ALL_TOOLS 与 TOOLS_BY_NAME 必须同源、不掉项
     assert set(TOOLS_BY_NAME) == names
