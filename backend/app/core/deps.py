@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 import jwt
+import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,9 +43,15 @@ async def get_identity(
     if creds is None or not creds.credentials:
         raise _UNAUTHORIZED
     try:
-        return decode_access_token(creds.credentials)
+        identity = decode_access_token(creds.credentials)
     except jwt.PyJWTError:  # 签名错、过期、格式非法都归到这
         raise _UNAUTHORIZED from None
+    # 鉴权成功：把租户/用户补进日志上下文（M9d）。中间件已绑了 trace_id，这里叠上身份，
+    # 自此本请求每条日志都能定位到"哪个租户的哪个用户"。FastAPI 会缓存本依赖结果 → 每请求只绑一次。
+    structlog.contextvars.bind_contextvars(
+        tenant_id=str(identity.tenant_id), user_id=str(identity.user_id)
+    )
+    return identity
 
 
 async def get_tenant_session(

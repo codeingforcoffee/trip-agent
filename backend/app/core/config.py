@@ -170,6 +170,17 @@ class Settings(BaseSettings):
     # 这是 env 兜底值；开了 Apollo 后，配置中心里的 cors_origins 会覆盖它并支持热更新。
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # —— 生产化收尾：可观测 + 传输层加固（M9d）——
+    # DeepSeek 计价（人民币元 / 每百万 token）。输入/输出分开算——两者差价常达数倍，
+    # 混一个均价会算歪成本。这是【可配置的估算价目表】，换模型/调价只改这里；
+    # 每条请求的成本核算进 http.request 结构化日志（trace 可观测的一部分）。
+    deepseek_price_in_per_1m: float = 2.0
+    deepseek_price_out_per_1m: float = 8.0
+    # 安全响应头总开关 + HSTS 参数。HSTS 只在 https 下下发（见 security_headers.py）。
+    security_headers_enabled: bool = True
+    hsts_max_age: int = 63072000  # 2 年（秒）——满足 HSTS preload 清单的最低时长要求
+    hsts_preload: bool = False  # 想进浏览器 preload 名单再开（须 includeSubDomains + 去注册）
+
     # —— 动态配置 / 配置中心（M9，可选 Apollo）——
     # 分层理念：静态配置(连接串/密钥)仍归 pydantic；只有需要【热更新】的子集(CORS/限流/开关)走 Apollo。
     # 默认【关】：只用 env，零额外依赖、不必跑 Apollo。开了才叠加，且 Apollo 不可达自动回退 env。

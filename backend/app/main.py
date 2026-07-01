@@ -26,6 +26,8 @@ from app.api import conversations as conversations_api
 from app.core.config import settings
 from app.core.dynamic_config import DynamicCORSMiddleware, dynamic_config
 from app.core.logging import get_logger, setup_logging
+from app.core.observability import ObservabilityMiddleware
+from app.core.security_headers import SecurityHeadersMiddleware
 from app.db import session as db
 from app.infra import redis_client as rds
 
@@ -93,6 +95,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 传输层加固（M9d）：安全响应头（HSTS 仅 https 下发）。
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 可观测（M9d）：trace_id / 时延 / token 成本。★最后 add ⇒ 最外层★——
+# 先于一切绑定 trace_id，并把整条链路（含内层中间件与 SSE 流式 body）都算进时延与成本。
+app.add_middleware(ObservabilityMiddleware)
 
 # 业务路由（M3）：登录发 JWT + 租户态会话增查
 app.include_router(auth_api.router)

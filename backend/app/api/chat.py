@@ -37,6 +37,7 @@ from app.agent.graph import build_graph
 from app.agent.tools import ALL_TOOLS
 from app.core.deps import rate_limit, require_scopes
 from app.core.logging import get_logger
+from app.core.observability import record_usage
 from app.core.security import SCOPE_CHAT, Identity
 from app.security.guards import StreamRedactor
 
@@ -119,6 +120,8 @@ async def stream_chat_events(graph, config: dict, step_input) -> AsyncIterator[t
     redactor = StreamRedactor()
     final_parts: list[str] = []
     total_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
 
     def _emit_token(raw: str) -> tuple[str, dict] | None:
         """把一段 LLM 原文增量过流式脱敏；有安全可吐的部分才产出 token 事件。"""
@@ -154,6 +157,9 @@ async def stream_chat_events(graph, config: dict, step_input) -> AsyncIterator[t
                     "interrupt",
                     dict(payload) if isinstance(payload, dict) else {"payload": payload},
                 )
+                # 中断也是本请求的一个结束点：把已累计的用量记进账本（供中间件核算成本）。
+                # 只记账、不额外吐 usage 事件——保持"interrupt 即结束流"的 SSE 契约（前端只需弹确认框）。
+                record_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
                 log.info("chat.interrupt", thread=config["configurable"]["thread_id"])
                 return
             if not update:
@@ -164,6 +170,8 @@ async def stream_chat_events(graph, config: dict, step_input) -> AsyncIterator[t
                         yield "tool_call", {"name": call["name"], "args": call["args"]}
                     if m.usage_metadata:
                         total_tokens += int(m.usage_metadata.get("total_tokens", 0) or 0)
+                        input_tokens += int(m.usage_metadata.get("input_tokens", 0) or 0)
+                        output_tokens += int(m.usage_metadata.get("output_tokens", 0) or 0)
                 elif isinstance(m, ToolMessage):
                     yield "tool_result", {"name": m.name, "content": _truncate(str(m.content))}
                     if m.name in _CITATION_TOOLS:
@@ -177,6 +185,8 @@ async def stream_chat_events(graph, config: dict, step_input) -> AsyncIterator[t
     if tail:
         final_parts.append(tail)
         yield "token", {"text": tail}
+    # 记账本（供最外层 ObservabilityMiddleware 在流结束后核算 token 成本并写进 http.request 日志）。
+    record_usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
     yield "usage", {"total_tokens": total_tokens}
     yield "done", {"final": "".join(final_parts)}
 
