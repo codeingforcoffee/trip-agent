@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent import memory
-from app.agent.context import make_llm_summarizer, maybe_compress
+from app.agent.context import latest_usage_tokens, make_llm_summarizer, maybe_compress
 from app.agent.reliability import CircuitOpen, call_tool_resilient
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS, TOOLS_BY_NAME
@@ -243,17 +243,21 @@ def build_graph(
         return {"messages": [AIMessage(content=question)]}
 
     async def compress_node(state: AgentState) -> dict:
-        """压缩节点（M6a）：每轮入口先过它；历史超 token 预算才把旧消息摘要 + 移除。
+        """压缩节点（M6a/M6+）：每轮入口先过它；用量超 high 水位才把旧轮次摘要 + 移除到 low 水位。
 
-        平时是廉价的"估算 token → 没超 → pass-through"，只有超预算时才花一次 LLM 摘要。
+        平时是廉价的"读用量 → 没超 → pass-through"，只有超水位时才花一次 LLM 摘要。
+        当前占用优先用上一轮真实 token 用量（含前缀），拿不到才回退字符估算。
         返回 RemoveMessage（add_messages reducer 据此删旧消息）+ 新 summary。
         """
         result = await maybe_compress(
             state["messages"],
             state.get("summary", ""),
-            budget=settings.context_token_budget,
-            keep_last=settings.compress_keep_last,
+            window_tokens=settings.context_window_tokens,
+            high_ratio=settings.compress_high_ratio,
+            low_ratio=settings.compress_low_ratio,
+            keep_last_floor=settings.compress_keep_last,
             summarize=summarizer,
+            used_tokens=latest_usage_tokens(state["messages"]),
         )
         if result is None:
             return {}

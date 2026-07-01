@@ -53,36 +53,58 @@ def test_estimate_tokens_grows_with_content():
     assert estimate_tokens(long) > estimate_tokens(short) > 0
 
 
-async def test_no_compress_under_budget():
+def _compress(msgs, summary="", *, window, high=0.7, low=0.4, floor=2, used=None):
+    """薄封装：按窗口比例调 maybe_compress（省得每处重复一堆水位参数）。"""
+    return maybe_compress(
+        msgs,
+        summary,
+        window_tokens=window,
+        high_ratio=high,
+        low_ratio=low,
+        keep_last_floor=floor,
+        summarize=_fake_summarize,
+        used_tokens=used,
+    )
+
+
+async def test_no_compress_under_high_watermark():
+    """用量未过 high 水位（上下文充足）→ 不压。"""
     msgs = _conversation_with_ids()
-    out = await maybe_compress(msgs, "", budget=10_000, keep_last=6, summarize=_fake_summarize)
-    assert out is None  # 没超预算 → 不动
+    out = await _compress(msgs, window=100_000)  # high=70000 ≫ 估算 → 不动
+    assert out is None
 
 
-async def test_compress_evicts_old_keeps_recent_at_human_boundary():
-    msgs = _conversation_with_ids()  # 10 条
-    out = await maybe_compress(msgs, "", budget=1, keep_last=2, summarize=_fake_summarize)
-    assert out is not None
-    # keep_last=2 的目标位是 index 8（h3），正好是 HumanMessage → 淘汰前 8 条（前两轮完整轮次）
-    assert out.evicted_count == 8
-    assert out.removed_ids == ["h1", "a1", "t1", "a2", "h2", "a3", "t3", "a4"]
-    assert out.summary == "[摘要|并入8条|旧:空]"
-
-
-async def test_safe_cut_never_orphans_tool_message():
-    """即便 keep_last 落在某轮中间（如 a4），也会向前snap到 HumanMessage，保完整轮次。"""
+async def test_uses_real_usage_over_estimate():
+    """传入真实用量时以它为准：即使消息很短，用量超 high 也照压。"""
     msgs = _conversation_with_ids()
-    # keep_last=3 → 目标 index 7（a4，AI），不能从这切（会孤立 tc2 的 ToolMessage）
-    out = await maybe_compress(msgs, "", budget=1, keep_last=3, summarize=_fake_summarize)
+    out = await _compress(msgs, window=100, high=0.7, low=0.01, floor=2, used=90)
+    assert out is not None  # used=90 > high=70 → 触发（不看字符估算）
+
+
+async def test_compress_to_low_watermark_evicts_minimally():
+    """按 low 水位【淘汰最少】：把 low 设成"保留后两轮"的 token 量 → 只淘汰第一轮就达标。"""
+    msgs = _conversation_with_ids()  # 三轮：[0:4] [4:8] [8:10]
+    low_target = estimate_tokens(msgs[4:])  # 保留后两轮所需 token
+    # window*low = low_target；high 设低确保触发；floor 不设限（2）
+    out = await _compress(msgs, window=low_target, high=0.0, low=1.0, floor=2)
     assert out is not None
-    # 向前snap到 index 4（h2）→ 只淘汰第一轮 4 条，保留后两轮完整
+    assert out.evicted_count == 4  # 只淘汰第一轮（最少淘汰即回到 low），保后两轮完整
+    assert out.removed_ids == ["h1", "a1", "t1", "a2"]
+
+
+async def test_never_orphans_tool_and_respects_floor():
+    """low 极低（够不到）→ 尽力淘汰，但落在 Human 边界、且保底 keep_last_floor 条。"""
+    msgs = _conversation_with_ids()  # 10 条，Human 在 0/4/8
+    out = await _compress(msgs, window=10, high=0.0, low=0.0, floor=3)
+    assert out is not None
+    # floor=3 → max_cut=7；≤7 的最老 Human 边界是 4（8>7 排除）→ 淘汰第一轮 4 条，不孤立 tool
     assert out.evicted_count == 4
     assert out.removed_ids == ["h1", "a1", "t1", "a2"]
 
 
 async def test_merges_into_existing_summary():
     msgs = _conversation_with_ids()
-    out = await maybe_compress(msgs, "旧摘要内容", budget=1, keep_last=2, summarize=_fake_summarize)
+    out = await _compress(msgs, "旧摘要内容", window=1, high=0.0, low=0.0, floor=2)
     assert out is not None
     assert "旧:旧摘要内容" in out.summary  # 旧摘要被传入摘要器融合
 
@@ -106,9 +128,11 @@ class _FakeLLM:
 
 
 async def test_graph_compress_node_fires_and_shrinks_history(monkeypatch):
-    # 把预算压到极低、保留最近 4 条，确保多消息输入必触发压缩
-    monkeypatch.setattr(settings, "context_token_budget", 50)
-    monkeypatch.setattr(settings, "compress_keep_last", 4)
+    # 把窗口压到极低（high/low 都很小）、保底 4 条，确保多消息输入必触发压缩
+    monkeypatch.setattr(settings, "context_window_tokens", 20)
+    monkeypatch.setattr(settings, "compress_high_ratio", 0.1)  # high=2
+    monkeypatch.setattr(settings, "compress_low_ratio", 0.1)  # low=2
+    monkeypatch.setattr(settings, "compress_keep_last", 4)  # 保底
 
     graph = build_graph(_FakeLLM(), ALL_TOOLS, enable_triage=False, enable_compress=True)
     # 8 条历史（4 轮 H/A），足以超 50 token 预算

@@ -117,13 +117,17 @@ class Settings(BaseSettings):
     # 关掉则退回直连图、每轮省一次 LLM 调用，但不再主动澄清（靠 system prompt 自觉）。
     enable_triage: bool = True
 
-    # —— 上下文压缩（M6a）——
+    # —— 上下文压缩（M6a / M6+：按窗口比例的双水位压缩）——
     # 是否启用 compress 节点（关掉则不压缩，历史无限增长）。
     enable_compress: bool = True
-    # 估算 token 超过它就触发压缩。设得远小于模型窗口，给本轮生成留足空间；
-    # 调小可在短对话里直接看到压缩触发（演示/测试用 CONTEXT_TOKEN_BUDGET 覆盖）。
-    context_token_budget: int = 6000
-    # 压缩时保留最近多少条原文，更早的摘要进 summary。
+    # 模型真实上下文窗口（token）。阈值按它的比例算——换模型只改这一处，不用改魔法数。
+    context_window_tokens: int = 65536  # deepseek-chat ≈ 64K
+    # 双水位：用量超过 high 比例才【触发】压缩；压缩时淘汰旧轮次直到降到 low 比例【目标】以下。
+    # high 留在 0.7 而非 0.9，是给"输出 headroom + 注入的 system/摘要/记忆前缀"留缓冲。
+    # low 远低于 high（gap 越大越不会"压一点马上又超"→ 抖动；也减少反复摘要的信息漂移）。
+    compress_high_ratio: float = 0.7  # 触发水位
+    compress_low_ratio: float = 0.4  # 目标水位
+    # 硬保底：无论如何都保留最近这么多条原文（防把当前轮也压掉）。
     compress_keep_last: int = 6
 
     # —— 长期记忆（M6b）——
