@@ -1,7 +1,9 @@
 import { auth, setSession, clearSession } from './auth.js'
 
-// 后端地址（跨源，走 M9 动态 CORS）。可用 .env 的 VITE_API_BASE 覆盖。
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// 后端地址。用 ?? 而非 ||：全栈部署（M9d）里前后端【同源】，构建时置 VITE_API_BASE=""，
+// 空串表示"用相对路径调 API"（经 Caddy 反代到 backend，无需 CORS）。?? 只在 undefined 时兜底，
+// 保留空串；若用 || 则空串会被误当 falsy 而回退到 localhost:8000。dev 未设该变量 → 走 localhost。
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
 
 // ————————————————————————— 认证 —————————————————————————
 

@@ -1,0 +1,41 @@
+# Caddyfile（M9d）：边缘 = TLS 终止 + 前端静态托管 + 反代后端。单 origin 消除生产 CORS。
+#
+# 本地：站点名 localhost → Caddy 用【内置 CA】自动签发本地可信证书（https://localhost 带锁；
+#   首次需信任 Caddy 的 root CA，见验证步骤）。
+# 生产：把 localhost 换成你的域名（并在全局块填 email），Caddy 自动走 ACME 向 Let's Encrypt
+#   申请并续期真证书——一行之差，零手工证书运维。这正是"把 TLS 复杂度收敛到边缘"的价值。
+
+{
+	# 生产解开并填管理员邮箱，用于 ACME 账户与证书到期通知：
+	# email admin@example.com
+}
+
+localhost {
+	# —— API：按路径反代到 backend 容器（容器内明文 HTTP；TLS 已在边缘终止）——
+	# reverse_proxy 默认带上 X-Forwarded-Proto/For，后端 --proxy-headers 据此识别 https 与真实 IP。
+	# HSTS/安全头由后端中间件在这些响应上补（它此刻 scheme=https），故这里不重复加，避免头重复。
+	@api path /auth/* /chat /chat/* /conversations /conversations/* /health /docs /openapi.json
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	# —— 其余：前端单页应用（静态资源 + SPA 路由回退到 index.html）——
+	# 静态响应不经过后端，故安全头在这里由边缘补齐（与后端中间件对齐，保持整站一致）。
+	handle {
+		header {
+			Strict-Transport-Security "max-age=63072000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			Referrer-Policy "strict-origin-when-cross-origin"
+		}
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	# 边缘访问日志（结构化 JSON，便于与后端 http.request 的 trace 关联）
+	log {
+		output stdout
+		format json
+	}
+}

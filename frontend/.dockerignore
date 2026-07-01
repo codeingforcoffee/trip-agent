@@ -1,0 +1,6 @@
+# 别拷进构建上下文：node_modules 交给 npm ci 在镜像内重装（跨平台一致），dist 由镜像内构建产出。
+node_modules
+dist
+*.log
+.env
+.env.*

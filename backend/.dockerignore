@@ -1,0 +1,11 @@
+# 别把这些拷进镜像：减小体积、避免泄密、避免缓存/虚拟环境污染构建。
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+*.log
+# 密钥绝不入镜像（运行时由 compose env_file 注入）
+.env

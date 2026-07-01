@@ -55,7 +55,53 @@ services:
     # 注：qdrant 官方镜像不含 curl/bash，容器级 healthcheck 不好写，
     # 这里改由后端 /health 通过客户端调用 get_collections() 来探活，更贴近真实可用性。
 
+  # —— 全栈服务（M9d）——
+  # 放进 profile "fullstack"：默认 `docker compose up`（make up）只起上面三个依赖，
+  # 不会误触发 backend 重镜像构建；`--profile fullstack`（make stack-up）才连 backend+edge 一起起。
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trip-backend
+    profiles: ["fullstack"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 容器内用【服务名】连依赖（覆盖 .env 里给宿主机用的 localhost）——environment 覆盖 env_file。
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      QDRANT_HOST: qdrant
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    # 不对外发布端口：只经 edge 访问。这让 --forwarded-allow-ips=* 是安全的（外部够不着后端）。
+    expose:
+      - "8000"
+
+  edge:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trip-edge
+    profiles: ["fullstack"]
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${EDGE_HTTP_PORT:-80}:80"
+      - "${EDGE_HTTPS_PORT:-443}:443"
+    volumes:
+      # 持久化 Caddy 自动签发的证书 / 内置 CA：重建容器不换 CA，免得反复重新信任。
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   pg_data:
   redis_data:
   qdrant_data:
+  caddy_data:
+  caddy_config:

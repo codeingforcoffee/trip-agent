@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help up down ps logs sync run health test migrate revision seed ingest lock-demo eval eval-live eval-record clean
+.PHONY: help up down ps logs sync run health test migrate revision seed ingest lock-demo eval eval-live eval-record stack-build stack-up stack-down clean
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -61,5 +61,14 @@ eval-live: ## 离线评测·真跑 DeepSeek（评当前 prompt 质量，不写 c
 eval-record: ## 离线评测·录制 cassette（真跑并把 LLM 响应按序录下，供 make eval 回放）
 	cd backend && uv run python -m eval.run_eval --mode record
 
+stack-build: ## 构建全栈镜像（backend + edge/前端）；backend 含依赖，首次较慢（M9d）
+	$(COMPOSE) --profile fullstack build
+
+stack-up: ## 一键起全栈（依赖 + backend + edge）；浏览器开 https://localhost（M9d）
+	$(COMPOSE) --profile fullstack up -d
+
+stack-down: ## 停全栈（保留数据卷）
+	$(COMPOSE) --profile fullstack down
+
 clean: ## 停止容器并删除数据卷（清空所有数据！）
-	$(COMPOSE) down -v
+	$(COMPOSE) --profile fullstack down -v
