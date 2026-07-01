@@ -97,14 +97,16 @@ async function* readSSE(response) {
 async function streamPost(path, payload, handlers) {
   const r = await authedPost(path, payload)
   if (r.status === 401) {
-    handlers.onError?.('登录已过期，请重新登录')
     clearSession()
+    handlers.error?.({ message: '登录已过期，请重新登录' })
     return
   }
   if (!r.ok || !r.body) {
-    handlers.onError?.(`请求失败（${r.status}）`)
+    handlers.error?.({ message: `请求失败（${r.status}）` })
     return
   }
+  // 按事件名分发。注意后端出错会发 event:error（如图崩溃），必须有对应 handler，
+  // 否则错误被静默吞掉、界面只剩空白气泡（这正是之前"预定返回空白"的表层原因）。
   for await (const { event, data } of readSSE(r)) {
     handlers[event]?.(data)
   }

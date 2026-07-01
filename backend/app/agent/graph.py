@@ -358,11 +358,28 @@ def build_graph(
 
         喂完整历史而非只喂最后一句，是为了天然处理多轮补槽/指代：第二轮"北京出发"
         时，triage 仍能从第一轮"我想去上海"里把 destination 抽回来，合并成完整槽位。
+
+        两处健壮性（都因线上真实翻车而加）：
+          1. **只喂对话文本，剔除工具调用痕迹**：结构化输出底层也是"工具调用"（TripIntent），
+             若把历史里的 search_flights/book_trip 等 tool_calls / ToolMessage 一起喂进去，
+             模型会被"带偏"去模仿调用一个真实业务工具（如幻觉出 book_flight），导致输出解析器
+             报 `Unknown tool type`。triage 只需意图+槽位，用不到工具结果，剥掉最干净。
+          2. **失败即降级、绝不崩主流程**：triage 是可选增强，一旦结构化解析异常，兜底成
+             "无需澄清、直接走 agent"——把决定权交回主 ReAct 循环（该下单就下单、该 HITL 就 HITL），
+             而不是让整轮对话空白报错。
         """
         sys = SystemMessage(content=TRIAGE_SYSTEM_PROMPT.format(today=date.today().isoformat()))
-        intent: TripIntent = await triage_llm.ainvoke(
-            [sys, *_summary_prefix(state), *state["messages"]]
-        )
+        # 只保留人类消息 + 不含 tool_calls 的助手文本（澄清追问等）；剔除工具调用/工具返回噪声
+        convo = [
+            m
+            for m in state["messages"]
+            if isinstance(m, HumanMessage) or (isinstance(m, AIMessage) and not m.tool_calls)
+        ]
+        try:
+            intent: TripIntent = await triage_llm.ainvoke([sys, *_summary_prefix(state), *convo])
+        except Exception as e:  # noqa: BLE001 —— 分诊是增强，解析失败就降级放行，别拖垮整轮
+            log.warning("triage.failed_fallback_to_agent", error=repr(e))
+            return {"intent": "unknown", "slots": {}, "clarify_needs": []}
         slots = {
             "origin": intent.origin,
             "destination": intent.destination,

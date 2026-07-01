@@ -127,3 +127,38 @@ async def test_graph_proceeds_when_slots_complete():
     out = await graph.ainvoke({"messages": [HumanMessage(content="明天北京到上海机票")]})
     assert out["clarify_needs"] == []
     assert out["messages"][-1].content == "这就为你查询。"
+
+
+class _RaisingStructured:
+    """模拟线上真实翻车：结构化输出解析抛异常（模型幻觉出一个真实业务工具名）。"""
+
+    async def ainvoke(self, messages):  # noqa: ANN001
+        raise Exception("Unknown tool type: 'book_flight'. Available tools: TripIntent")
+
+
+class _FakeLLMTriageRaises:
+    def __init__(self, agent_response: AIMessage):
+        self._agent_response = agent_response
+
+    def bind_tools(self, tools):  # noqa: ANN001
+        return _FakeAgentRunnable(self._agent_response)
+
+    def with_structured_output(self, schema):  # noqa: ANN001
+        return _RaisingStructured()
+
+
+async def test_graph_survives_triage_parse_failure():
+    """triage 结构化解析失败 → 降级放行到 agent，不崩、不返回空白（回归：'预定'返回空白 bug）。"""
+    fake = _FakeLLMTriageRaises(AIMessage(content="好的，这就为您下单。"))
+    graph = build_graph(
+        fake,
+        ALL_TOOLS,
+        enable_triage=True,
+        enable_hitl=False,
+        enable_memory=False,
+        enable_compress=False,
+        enable_guards=False,
+    )
+    out = await graph.ainvoke({"messages": [HumanMessage(content="预定")]})
+    assert out["clarify_needs"] == []  # 降级为"无需澄清"
+    assert out["messages"][-1].content == "好的，这就为您下单。"  # 主流程照常产出

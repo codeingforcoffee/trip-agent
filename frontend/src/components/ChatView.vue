@@ -33,8 +33,9 @@ function makeHandlers(msg) {
     },
     usage: (d) => (msg.usage = d.total_tokens),
     done: () => (msg.streaming = false),
-    onError: (m) => {
-      msg.error = m
+    // 事件名对齐后端的 event:error（此前叫 onError 收不到 → 空白气泡）
+    error: (d) => {
+      msg.error = (d && d.message) || '对话处理出错，请重试'
       msg.streaming = false
     },
   }
