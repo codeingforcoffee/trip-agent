@@ -120,6 +120,41 @@ class Conversation(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+class UserPreference(Base):
+    """用户长期偏好（M6b）：跨会话记住的**结构化**偏好，按 (tenant,user,key) 唯一。
+
+    为什么偏好用结构化表而非向量库（面试要点）：偏好会**变**（"靠窗"→"靠过道"），
+    结构化 + 唯一键让"更新"就是一次幂等 upsert（recency wins），绝不产生自相矛盾的两条；
+    若塞进向量库，新旧值会并存，召回可能给出过时的那条。自由文本的情景事实才进 Qdrant。
+
+    confidence/source 让"用户明说的"（高置信）与"系统推断的"（低置信）可区分——
+    避免一次行为就过拟合成规则。updated_at 支持"近时优先"。
+    """
+
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "key", name="uq_user_preferences_tenant_user_key"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    key: Mapped[str] = mapped_column(String(100), nullable=False)  # 归一化键，如 seat_preference
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(nullable=False, default=1.0)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="explicit"
+    )  # explicit/inferred
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class AuditLog(Base):
     """审计日志（M7 大用，M3 先把表建好）。谁、在哪个租户、做了什么、细节。
 
@@ -141,6 +176,7 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
-# 受 RLS 保护的表清单（带 tenant_id 的业务表）。Alembic 迁移与测试都引用它，
-# 避免"新增一张表忘了开 RLS"——单一事实来源。
-TENANT_SCOPED_TABLES = ("users", "conversations", "audit_logs")
+# 受 RLS 保护的表清单（带 tenant_id 的业务表）。测试引用它，避免"新增一张表忘了开 RLS"。
+# 注意：历史迁移各自【冻结】自己那批表名（不引用本常量），以保证从零重放时顺序正确
+# （M3 建前三张、M6b 建 user_preferences，各自开各自的 RLS）。
+TENANT_SCOPED_TABLES = ("users", "conversations", "audit_logs", "user_preferences")

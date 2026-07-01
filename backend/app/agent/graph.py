@@ -21,6 +21,7 @@ from time import perf_counter
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
+    HumanMessage,
     RemoveMessage,
     SystemMessage,
     ToolMessage,
@@ -30,6 +31,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent import memory
 from app.agent.context import make_llm_summarizer, maybe_compress
 from app.agent.reliability import CircuitOpen, call_tool_resilient
 from app.agent.state import AgentState
@@ -74,6 +76,22 @@ def _summary_prefix(state: AgentState) -> list[AnyMessage]:
     if not summary:
         return []
     return [SystemMessage(content=f"【对话摘要（更早历史已压缩，仅供参考）】\n{summary}")]
+
+
+def _memory_prefix(state: AgentState) -> list[AnyMessage]:
+    """把召回的长期记忆（偏好 + 相关历史）拼成一条 SystemMessage，供 agent 主动应用。"""
+    mem = state.get("memory_context")
+    if not mem:
+        return []
+    return [SystemMessage(content=f"【关于该用户的已知长期记忆，可在建议中主动应用】\n{mem}")]
+
+
+def _last_human_text(messages: list[AnyMessage]) -> str:
+    """取最后一条用户消息文本（作为语义召回的查询）。"""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return str(m.content or "")
+    return ""
 
 
 def should_continue(state: AgentState) -> str:
@@ -132,6 +150,7 @@ def build_graph(
     checkpointer=None,
     enable_triage: bool | None = None,
     enable_compress: bool | None = None,
+    enable_memory: bool | None = None,
 ) -> CompiledStateGraph:
     """组装并编译图。llm 为已构造的聊天模型；checkpointer 为短期记忆后端。
 
@@ -139,6 +158,7 @@ def build_graph(
     关掉就退回 M2 的 START→agent 直连图（省一次 LLM 调用，但不再主动澄清）。
 
     enable_compress：是否启用上下文压缩入口节点（M6a）。None 时取 settings.enable_compress。
+    enable_memory：是否启用长期记忆（recall 入口 + memorize 收尾）（M6b）。None 时取 settings.enable_memory。
     """
     tools = tools if tools is not None else ALL_TOOLS
     tools_by_name = {t.name: t for t in tools} or TOOLS_BY_NAME
@@ -146,6 +166,8 @@ def build_graph(
         enable_triage = settings.enable_triage
     if enable_compress is None:
         enable_compress = settings.enable_compress
+    if enable_memory is None:
+        enable_memory = settings.enable_memory
     # bind_tools：把工具的 JSON Schema 告诉模型，模型才会产出 tool_calls
     llm_with_tools = llm.bind_tools(tools)
     # triage 用结构化输出，提前 bind 一次复用；关闭时不调用，便于无该能力的 LLM 直连
@@ -154,8 +176,13 @@ def build_graph(
     summarizer = make_llm_summarizer(llm)
 
     async def agent_node(state: AgentState) -> dict[str, list[AnyMessage]]:
-        """agent 节点：把系统提示 +（滚动摘要）+ 历史消息喂给模型，拿回它的决策/回答。"""
-        messages = [_system_message(), *_summary_prefix(state), *state["messages"]]
+        """agent 节点：把系统提示 +（滚动摘要）+（长期记忆）+ 历史消息喂给模型，拿回它的决策/回答。"""
+        messages = [
+            _system_message(),
+            *_summary_prefix(state),
+            *_memory_prefix(state),
+            *state["messages"],
+        ]
         response = await llm_with_tools.ainvoke(messages)
         if response.tool_calls:
             log.info(
@@ -242,31 +269,85 @@ def build_graph(
             "messages": [RemoveMessage(id=mid) for mid in result.removed_ids],
         }
 
+    async def recall_node(state: AgentState, config: RunnableConfig) -> dict:
+        """召回节点（M6b）：每轮入口，把该用户的偏好 + 相关历史记忆注入 state.memory_context。
+
+        无身份（离线结构测试不带 config）或召回失败 → 返回 {}（记忆是增强，不该中断对话）。
+        """
+        cfg = config.get("configurable") or {}
+        tenant_id, user_id = cfg.get("tenant_id"), cfg.get("user_id")
+        if not tenant_id or not user_id:
+            return {}
+        try:
+            ctx = await memory.recall(
+                _last_human_text(state["messages"]), tenant_id=str(tenant_id), user_id=str(user_id)
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory.recall_failed", error=repr(e))
+            return {}
+        if not ctx:
+            return {}
+        log.info("memory.recall", chars=len(ctx))
+        return {"memory_context": ctx}
+
+    async def memorize_node(state: AgentState, config: RunnableConfig) -> dict:
+        """收尾节点（M6b）：turn 结束抽取值得记的偏好/事实并写入长期记忆。
+
+        当前**同步**实现（简单、CLI 可复现）；生产可改 write-behind（后台队列）不阻塞用户响应。
+        写入失败不中断对话。
+        """
+        cfg = config.get("configurable") or {}
+        tenant_id, user_id = cfg.get("tenant_id"), cfg.get("user_id")
+        if not tenant_id or not user_id:
+            return {}
+        try:
+            stats = await memory.memorize(
+                llm, state["messages"], tenant_id=str(tenant_id), user_id=str(user_id)
+            )
+            if stats:
+                log.info("memory.write", **stats)
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory.write_failed", error=repr(e))
+        return {}
+
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
-    # 条件边：agent 之后，按 should_continue 的返回值选择去向
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
-    builder.add_edge("tools", "agent")  # 工具跑完回到 agent，形成循环
+    builder.add_edge("tools", "agent")  # 工具跑完回到 agent，形成 ReAct 循环
 
-    # M6a：compress 作为每轮入口节点。enable_compress 关闭时不挂它，START 直连后续。
-    entry = "agent"
+    # agent 之后：还要调工具 → tools；否则去"收尾"。开了长期记忆时收尾是 memorize，否则直接 END。
+    end_target = END
+    if enable_memory:
+        builder.add_node("memorize", memorize_node)
+        builder.add_edge("memorize", END)
+        end_target = "memorize"
+    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": end_target})
+
+    # triage/clarify（M2+）
+    core_entry = "agent"
     if enable_triage:
-        # triage →(缺槽)→ clarify → END ；(齐了)→ agent
         builder.add_node("triage", triage_node)
         builder.add_node("clarify", clarify_node)
         builder.add_conditional_edges(
             "triage", route_after_triage, {"clarify": "clarify", "agent": "agent"}
         )
-        builder.add_edge("clarify", END)
-        entry = "triage"
+        # 澄清轮也走收尾：用户可能在"信息不全"的一句里顺带表达了偏好（如"记住我只坐靠窗"被
+        # 误判成缺槽的 flight），仍要能抽取记忆，而不是被 clarify→END 吞掉。
+        builder.add_edge("clarify", end_target)
+        core_entry = "triage"
 
+    # 入口链：START →(compress M6a)→(recall M6b)→ core_entry。按开关拼接，避免各组合写死。
+    chain: list[str] = []
     if enable_compress:
         builder.add_node("compress", compress_node)
-        builder.add_edge(START, "compress")
-        builder.add_edge("compress", entry)
-    else:
-        builder.add_edge(START, entry)
+        chain.append("compress")
+    if enable_memory:
+        builder.add_node("recall", recall_node)
+        chain.append("recall")
+    chain.append(core_entry)
+    builder.add_edge(START, chain[0])
+    for a, b in zip(chain, chain[1:], strict=False):
+        builder.add_edge(a, b)
 
     # compile 时传入 checkpointer：图每走一步都会把 State 存进它（=短期记忆）
     return builder.compile(checkpointer=checkpointer)

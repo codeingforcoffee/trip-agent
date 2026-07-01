@@ -42,9 +42,8 @@ def get_qdrant_client() -> AsyncQdrantClient:
     return build_qdrant_client()
 
 
-async def ensure_rag_collection(client: AsyncQdrantClient) -> None:
-    """确保 `rag` 集合与 tenant_id 索引存在（幂等，ingest 启动时调）。"""
-    name = settings.rag_collection
+async def _ensure_collection(client: AsyncQdrantClient, name: str, index_fields: list[str]) -> None:
+    """确保某集合存在（512 维 + Cosine），并给指定 payload 字段建关键字索引（幂等）。"""
     if not await client.collection_exists(name):
         await client.create_collection(
             collection_name=name,
@@ -54,12 +53,22 @@ async def ensure_rag_collection(client: AsyncQdrantClient) -> None:
             ),
         )
         log.info("qdrant.collection_created", collection=name, dim=embedding_dim())
-    # 给 tenant_id 建关键字索引；已存在则 Qdrant 视为幂等无副作用
-    try:
-        await client.create_payload_index(
-            collection_name=name,
-            field_name="tenant_id",
-            field_schema=qm.PayloadSchemaType.KEYWORD,
-        )
-    except Exception as e:  # noqa: BLE001 —— 索引已存在等情况不应中断
-        log.info("qdrant.payload_index_skip", error=repr(e))
+    for field in index_fields:
+        try:
+            await client.create_payload_index(
+                collection_name=name,
+                field_name=field,
+                field_schema=qm.PayloadSchemaType.KEYWORD,
+            )
+        except Exception as e:  # noqa: BLE001 —— 索引已存在等情况不应中断
+            log.info("qdrant.payload_index_skip", collection=name, field=field, error=repr(e))
+
+
+async def ensure_rag_collection(client: AsyncQdrantClient) -> None:
+    """确保 `rag` 集合与 tenant_id 索引存在（幂等，ingest 启动时调）。"""
+    await _ensure_collection(client, settings.rag_collection, ["tenant_id"])
+
+
+async def ensure_memory_collection(client: AsyncQdrantClient) -> None:
+    """确保 `memory` 集合存在（M6b 长期记忆）；按 tenant_id + user_id 过滤，故两者都建索引。"""
+    await _ensure_collection(client, settings.memory_collection, ["tenant_id", "user_id"])

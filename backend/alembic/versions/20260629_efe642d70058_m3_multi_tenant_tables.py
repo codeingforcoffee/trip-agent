@@ -14,7 +14,6 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from app.core.config import settings
-from app.db.models import TENANT_SCOPED_TABLES
 
 # revision identifiers, used by Alembic.
 revision: str = "efe642d70058"
@@ -25,6 +24,11 @@ depends_on: str | Sequence[str] | None = None
 # 应用专用角色（普通角色，受 RLS 约束）。所有受租户保护的表都授权给它。
 _APP_ROLE = settings.app_db_user
 _APP_PWD = settings.app_db_password
+
+# 本迁移当时建的受保护表——【冻结】在此，不引用 app.db.models 的常量。
+# 否则将来往那个常量加表（如 M6b 的 user_preferences），从零重放时 M3 会试图给一张
+# 尚未创建的表开 RLS 而报错。迁移应表示"某一时刻"，不随应用常量演进。
+TENANT_SCOPED_TABLES = ("users", "conversations", "audit_logs")
 
 
 def _create_app_role_and_rls() -> None:

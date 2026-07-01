@@ -38,3 +38,8 @@ class AgentState(TypedDict):
     # 滚动摘要：被淘汰的旧消息被压缩进这里，每次重算覆盖（last-write-wins）。
     # agent/triage 节点会把它作为一段上下文拼在 system 之后，于是压缩后仍不丢线索。
     summary: NotRequired[str]
+
+    # —— M6b 长期记忆写入的字段 ——
+    # 每轮入口 recall 节点把"偏好 + 相关历史记忆"拼进来，agent 节点注入 system 后主动应用。
+    # 每轮重算覆盖；只在本次调用内使用，不代表持久事实（持久事实在 Postgres/Qdrant）。
+    memory_context: NotRequired[str]

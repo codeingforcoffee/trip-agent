@@ -126,6 +126,15 @@ class Settings(BaseSettings):
     # 压缩时保留最近多少条原文，更早的摘要进 summary。
     compress_keep_last: int = 6
 
+    # —— 长期记忆（M6b）——
+    # 是否启用长期记忆（会话开始召回偏好/事实注入，turn 结束抽取写入）。
+    enable_memory: bool = True
+    memory_collection: str = "memory"  # 情景/语义记忆的 Qdrant 集合（区别于 RAG 的 rag）
+    memory_recall_k: int = 3  # 每轮语义召回条数
+    memory_recall_threshold: float = 0.5  # 语义召回的余弦下限（低于视为不相关）
+    memory_dedup_threshold: float = 0.9  # 写入去重：与已有记忆相似超过它则视为重复、不再写
+    memory_min_confidence: float = 0.6  # 抽取候选的置信度闸门，低于它不落库（宁缺毋滥）
+
     # —— JWT 鉴权（M3 引入）——
     # 默认值≥32 字节：HS256 的 HMAC 密钥短于 32 字节 pyjwt 会告警（且不安全）。
     # 这仍是显眼的占位串，生产务必用 `openssl rand -hex 32` 换掉。

@@ -75,46 +75,54 @@ async def show_history(thread_id: str) -> None:
             print(f"  [{role}] {_truncate(str(m.content) or '(空)')}{extra}")
 
 
-async def _resolve_tenant_id(slug: str) -> str | None:
-    """按 slug 查 tenant_id(UUID)，用于把租户身份注入 config（RAG 工具按它做租户过滤）。
+async def _resolve_ids(slug: str, email: str | None) -> tuple[str | None, str | None]:
+    """按 slug 查 tenant_id、按 email(或该租户首个用户)查 user_id，注入 config。
 
-    超级用户连接（管理操作）。查不到返回 None——此时 RAG policy 工具会 fail-closed 提示无身份。
+    tenant_id 供 RAG 租户过滤；user_id 供 M6b 长期记忆（按用户隔离）。超级用户连接（管理操作）。
     """
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from app.core.config import settings
-    from app.db.models import Tenant
+    from app.db.models import Tenant, User
 
     engine = create_async_engine(settings.database_url)
     try:
         async with engine.connect() as conn:
-            row = (await conn.execute(select(Tenant.id).where(Tenant.slug == slug))).first()
-            return str(row[0]) if row else None
+            trow = (await conn.execute(select(Tenant.id).where(Tenant.slug == slug))).first()
+            if trow is None:
+                return None, None
+            tenant_id = trow[0]
+            q = select(User.id).where(User.tenant_id == tenant_id)
+            q = q.where(User.email == email) if email else q.order_by(User.created_at)
+            urow = (await conn.execute(q.limit(1))).first()
+            return str(tenant_id), (str(urow[0]) if urow else None)
     finally:
         await engine.dispose()
 
 
-def _config(thread_id: str, tenant_id: str | None) -> dict:
-    """CLI 用的 RunnableConfig：thread_id 定短期记忆命名空间，tenant_id 供 RAG 租户过滤。"""
-    return {"configurable": {"thread_id": thread_id, "tenant_id": tenant_id}}
+def _config(thread_id: str, tenant_id: str | None, user_id: str | None) -> dict:
+    """CLI 用的 RunnableConfig：thread_id 定短期记忆命名空间；tenant_id/user_id 供 RAG 与长期记忆。"""
+    return {"configurable": {"thread_id": thread_id, "tenant_id": tenant_id, "user_id": user_id}}
 
 
-async def run_once(thread_id: str, message: str, tenant: str) -> None:
+async def run_once(thread_id: str, message: str, tenant: str, user: str | None) -> None:
     async with open_checkpointer() as cp:
         graph = build_graph(get_llm(), ALL_TOOLS, checkpointer=cp)
-        tenant_id = await _resolve_tenant_id(tenant)
-        await run_turn(graph, _config(thread_id, tenant_id), message)
+        tenant_id, user_id = await _resolve_ids(tenant, user)
+        await run_turn(graph, _config(thread_id, tenant_id, user_id), message)
 
 
-async def run_interactive(thread_id: str, tenant: str) -> None:
-    tenant_id = await _resolve_tenant_id(tenant)
-    print(f"进入交互模式（thread_id={thread_id}，租户={tenant}）。输入 exit/quit 退出。")
-    if tenant_id is None:
-        print(f"⚠️  租户 slug={tenant} 未找到（先 make seed），政策检索将不可用。")
+async def run_interactive(thread_id: str, tenant: str, user: str | None) -> None:
+    tenant_id, user_id = await _resolve_ids(tenant, user)
+    print(
+        f"进入交互模式（thread_id={thread_id}，租户={tenant}，user={user_id}）。输入 exit/quit 退出。"
+    )
+    if tenant_id is None or user_id is None:
+        print("⚠️  租户/用户未找到（先 make seed），政策检索与长期记忆将不可用。")
     async with open_checkpointer() as cp:
         graph = build_graph(get_llm(), ALL_TOOLS, checkpointer=cp)
-        config = _config(thread_id, tenant_id)
+        config = _config(thread_id, tenant_id, user_id)
         loop = asyncio.get_running_loop()
         while True:
             # input() 是阻塞调用，放进线程池避免卡住事件循环
@@ -132,6 +140,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="差旅 Agent CLI（M1）")
     parser.add_argument("--thread", default="demo", help="会话 ID（短期记忆按它隔离）")
     parser.add_argument("--tenant", default="acme", help="租户 slug（RAG 按租户隔离检索）")
+    parser.add_argument(
+        "--user", default=None, help="用户 email（长期记忆按用户隔离；缺省取该租户首个用户）"
+    )
     parser.add_argument("--message", help="一次性发送一条消息后退出")
     parser.add_argument("--history", action="store_true", help="打印该会话的历史消息")
     args = parser.parse_args()
@@ -139,9 +150,9 @@ def main() -> None:
     if args.history:
         asyncio.run(show_history(args.thread))
     elif args.message:
-        asyncio.run(run_once(args.thread, args.message, args.tenant))
+        asyncio.run(run_once(args.thread, args.message, args.tenant, args.user))
     else:
-        asyncio.run(run_interactive(args.thread, args.tenant))
+        asyncio.run(run_interactive(args.thread, args.tenant, args.user))
 
 
 if __name__ == "__main__":
