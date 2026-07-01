@@ -159,6 +159,8 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me-in-production-please"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    # 刷新令牌有效期（天）：长命但可旋转/撤销（M9b）。access 短命无状态、refresh 长命有状态兜底。
+    jwt_refresh_expire_days: int = 14
 
     # —— 全栈打通（M9）——
     # FastAPI 版 checkpointer 用【连接池】而非单连接：Web 服务并发请求多，而 psycopg
